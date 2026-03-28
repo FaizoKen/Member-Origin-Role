@@ -1,0 +1,3 @@
+[env]
+CC = "C:\\msys64\\mingw64\\bin\\gcc-wrap.cmd"
+AR = "C:\\msys64\\mingw64\\bin\\ar.exe"

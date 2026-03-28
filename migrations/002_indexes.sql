@@ -1,0 +1,9 @@
+CREATE INDEX IF NOT EXISTS idx_user_guilds_guild ON user_guilds (guild_id);
+CREATE INDEX IF NOT EXISTS idx_web_contexts_country ON web_contexts (country);
+CREATE INDEX IF NOT EXISTS idx_web_contexts_platform ON web_contexts (platform);
+CREATE INDEX IF NOT EXISTS idx_web_contexts_browser ON web_contexts (browser);
+CREATE INDEX IF NOT EXISTS idx_web_contexts_device_type ON web_contexts (device_type);
+CREATE INDEX IF NOT EXISTS idx_web_contexts_timezone ON web_contexts (timezone);
+CREATE INDEX IF NOT EXISTS idx_web_contexts_language ON web_contexts (language);
+CREATE INDEX IF NOT EXISTS idx_web_contexts_last_visit ON web_contexts (last_visit);
+CREATE INDEX IF NOT EXISTS idx_role_assignments_discord ON role_assignments (discord_id);
