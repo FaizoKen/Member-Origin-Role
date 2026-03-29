@@ -29,9 +29,7 @@ pub async fn sync_for_player(
 ) -> Result<(), AppError> {
     let web_ctx = sqlx::query_as::<_, WebContextRow>(
         "SELECT timezone, utc_offset, country, platform, browser, \
-         language, device_type, vpn_detected, spoofing_detected, impossible_travel, \
-         vpn_ever_detected, spoofing_ever_detected, impossible_travel_ever_detected, \
-         fraud_clean_since \
+         language, device_type, vpn_detected, spoofing_detected, impossible_travel \
          FROM web_contexts WHERE discord_id = $1",
     )
     .bind(discord_id)
@@ -145,20 +143,15 @@ fn build_condition_where(conditions: &WebConditions) -> (String, Vec<ConditionBi
     let mut clauses: Vec<String> = Vec::new();
     let mut binds: Vec<ConditionBind> = Vec::new();
 
-    // Fraud toggles — use persistent "ever" flags with cooldown.
-    // A user is blocked if ever_detected=true AND (currently dirty OR cooldown hasn't expired).
-    const FRAUD_COOLDOWN_DAYS: i64 = 7;
-    let cooldown_clause = format!(
-        "(wc.fraud_clean_since IS NULL OR wc.fraud_clean_since > now() - interval '{FRAUD_COOLDOWN_DAYS} days')"
-    );
+    // Fraud toggles — use current-visit flags so roles update immediately when cleared.
     if conditions.block_vpn {
-        clauses.push(format!("NOT (wc.vpn_ever_detected AND {cooldown_clause})"));
+        clauses.push("NOT wc.vpn_detected".to_string());
     }
     if conditions.block_spoofing {
-        clauses.push(format!("NOT (wc.spoofing_ever_detected AND {cooldown_clause})"));
+        clauses.push("NOT wc.spoofing_detected".to_string());
     }
     if conditions.block_impossible_travel {
-        clauses.push(format!("NOT (wc.impossible_travel_ever_detected AND {cooldown_clause})"));
+        clauses.push("NOT wc.impossible_travel".to_string());
     }
 
     // Identity condition

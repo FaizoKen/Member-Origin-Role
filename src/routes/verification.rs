@@ -472,27 +472,15 @@ pub async fn collect(
         "INSERT INTO web_contexts (discord_id, raw_data, timezone, utc_offset, country, \
          platform, browser, language, device_type, visit_count, \
          vpn_detected, spoofing_detected, impossible_travel, \
-         vpn_ever_detected, spoofing_ever_detected, impossible_travel_ever_detected, \
-         fraud_clean_since, \
          prev_country, prev_visit_at, \
          user_agent, ip_address, accept_language, first_visit, last_visit) \
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 1, \
-         $10, $11, $12, $10, $11, $12, \
-         CASE WHEN NOT ($10 OR $11 OR $12) THEN now() ELSE NULL END, \
+         $10, $11, $12, \
          $13, $14, $15, $16, $17, now(), now()) \
          ON CONFLICT (discord_id) DO UPDATE SET \
          raw_data = $2, timezone = $3, utc_offset = $4, country = COALESCE($5, web_contexts.country), \
          platform = $6, browser = $7, language = $8, device_type = $9, \
          vpn_detected = $10, spoofing_detected = $11, impossible_travel = $12, \
-         vpn_ever_detected = web_contexts.vpn_ever_detected OR $10, \
-         spoofing_ever_detected = web_contexts.spoofing_ever_detected OR $11, \
-         impossible_travel_ever_detected = web_contexts.impossible_travel_ever_detected OR $12, \
-         fraud_clean_since = CASE \
-             WHEN ($10 OR $11 OR $12) THEN NULL \
-             WHEN web_contexts.fraud_clean_since IS NOT NULL THEN web_contexts.fraud_clean_since \
-             WHEN NOT (web_contexts.vpn_detected OR web_contexts.spoofing_detected OR web_contexts.impossible_travel) THEN web_contexts.last_visit \
-             ELSE now() \
-         END, \
          prev_country = web_contexts.country, prev_visit_at = web_contexts.last_visit, \
          user_agent = $15, ip_address = COALESCE($16, web_contexts.ip_address), \
          accept_language = COALESCE($17, web_contexts.accept_language), \
