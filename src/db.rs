@@ -28,6 +28,11 @@ pub async fn run_migrations(pool: &PgPool) {
         .await
         .expect("Failed to run migration 004");
 
+    sqlx::raw_sql(include_str!("../migrations/005_persistent_fraud_flags.sql"))
+        .execute(pool)
+        .await
+        .expect("Failed to run migration 005");
+
     sqlx::raw_sql(include_str!("../migrations/002_indexes.sql"))
         .execute(pool)
         .await
