@@ -1,5 +1,8 @@
 use crate::models::condition::{ConditionField, ConditionOperator, WebConditions};
 
+/// Fraud flags clear after 7 days of clean visits.
+const FRAUD_COOLDOWN_DAYS: i64 = 7;
+
 /// Row data from web_contexts table for in-memory evaluation.
 #[derive(Debug, sqlx::FromRow)]
 pub struct WebContextRow {
@@ -13,18 +16,37 @@ pub struct WebContextRow {
     pub vpn_detected: bool,
     pub spoofing_detected: bool,
     pub impossible_travel: bool,
+    pub vpn_ever_detected: bool,
+    pub spoofing_ever_detected: bool,
+    pub impossible_travel_ever_detected: bool,
+    pub fraud_clean_since: Option<chrono::DateTime<chrono::Utc>>,
+}
+
+/// Check if a persistent "ever" flag is still active (cooldown hasn't expired).
+fn fraud_flag_active(ever_detected: bool, fraud_clean_since: Option<chrono::DateTime<chrono::Utc>>) -> bool {
+    if !ever_detected {
+        return false;
+    }
+    // If currently dirty (no clean_since), flag is active
+    let Some(clean_since) = fraud_clean_since else {
+        return true;
+    };
+    // Flag clears after FRAUD_COOLDOWN_DAYS of clean visits
+    let cooldown = chrono::Duration::days(FRAUD_COOLDOWN_DAYS);
+    chrono::Utc::now() - clean_since < cooldown
 }
 
 /// Evaluate conditions against web context. All enabled checks are AND'd.
+/// Uses persistent "ever" flags so fraud detection survives clean revisits.
 pub fn evaluate(conditions: &WebConditions, ctx: &WebContextRow) -> bool {
-    // Fraud checks first (early exit)
-    if conditions.block_vpn && ctx.vpn_detected {
+    // Fraud checks first (early exit) — use persistent flags
+    if conditions.block_vpn && fraud_flag_active(ctx.vpn_ever_detected, ctx.fraud_clean_since) {
         return false;
     }
-    if conditions.block_spoofing && ctx.spoofing_detected {
+    if conditions.block_spoofing && fraud_flag_active(ctx.spoofing_ever_detected, ctx.fraud_clean_since) {
         return false;
     }
-    if conditions.block_impossible_travel && ctx.impossible_travel {
+    if conditions.block_impossible_travel && fraud_flag_active(ctx.impossible_travel_ever_detected, ctx.fraud_clean_since) {
         return false;
     }
 
@@ -99,6 +121,10 @@ mod tests {
             vpn_detected: false,
             spoofing_detected: false,
             impossible_travel: false,
+            vpn_ever_detected: false,
+            spoofing_ever_detected: false,
+            impossible_travel_ever_detected: false,
+            fraud_clean_since: None,
         }
     }
 
@@ -175,15 +201,39 @@ mod tests {
         let mut c = cond("country", "eq", json!("US"));
         c.block_vpn = true;
         let mut ctx = sample_context();
-        ctx.vpn_detected = true;
+        ctx.vpn_ever_detected = true; // persistent flag, no clean_since → actively blocked
         assert!(!evaluate(&c, &ctx)); // blocked
+    }
+
+    #[test]
+    fn test_block_vpn_blocks_even_after_clean_visit() {
+        // Critical test: user visited with VPN, then visited clean — flag persists during cooldown
+        let mut c = cond("country", "eq", json!("US"));
+        c.block_vpn = true;
+        let mut ctx = sample_context();
+        ctx.vpn_detected = false; // current visit is clean
+        ctx.vpn_ever_detected = true; // but was detected before
+        ctx.fraud_clean_since = Some(chrono::Utc::now()); // just became clean
+        assert!(!evaluate(&c, &ctx)); // still blocked — cooldown hasn't expired
+    }
+
+    #[test]
+    fn test_block_vpn_clears_after_cooldown() {
+        let mut c = cond("country", "eq", json!("US"));
+        c.block_vpn = true;
+        let mut ctx = sample_context();
+        ctx.vpn_detected = false;
+        ctx.vpn_ever_detected = true;
+        // Clean for 8 days (past 7-day cooldown)
+        ctx.fraud_clean_since = Some(chrono::Utc::now() - chrono::Duration::days(8));
+        assert!(evaluate(&c, &ctx)); // cooldown expired → passes
     }
 
     #[test]
     fn test_block_tz_mismatch_passes_clean() {
         let mut c = cond("country", "eq", json!("US"));
         c.block_spoofing = true;
-        assert!(evaluate(&c, &sample_context())); // mismatch = false → passes
+        assert!(evaluate(&c, &sample_context())); // ever_detected = false → passes
     }
 
     #[test]
@@ -191,7 +241,7 @@ mod tests {
         let mut c = cond("country", "eq", json!("US"));
         c.block_spoofing = true;
         let mut ctx = sample_context();
-        ctx.spoofing_detected = true;
+        ctx.spoofing_ever_detected = true; // persistent flag
         assert!(!evaluate(&c, &ctx)); // blocked
     }
 
@@ -199,7 +249,7 @@ mod tests {
     fn test_vpn_not_blocked_when_toggle_off() {
         let c = cond("country", "eq", json!("US")); // block_vpn = false
         let mut ctx = sample_context();
-        ctx.vpn_detected = true;
+        ctx.vpn_ever_detected = true;
         assert!(evaluate(&c, &ctx)); // not blocked because toggle is off
     }
 

@@ -200,8 +200,8 @@ async function collectData() {{
     }};
     const result = await api('POST', '/verify/collect', payload);
     if (result.context) renderMeta(result.context);
-    if (result.flagged) {{
-      showMsg('Your connection was flagged. Some roles may not be assigned. Try disabling any VPN or proxy and refresh.', 'error');
+    if (result.hint) {{
+      showMsg(result.hint, 'error');
     }} else {{
       showMsg('Identity data collected successfully!', 'success');
     }}
@@ -237,16 +237,25 @@ init();
     )
 }
 
-#[derive(Deserialize)]
-pub struct LoginQuery {
-    redirect: Option<String>,
-}
+/// Maximum concurrent pending OAuth states (prevents login spam).
+const MAX_PENDING_OAUTH_STATES: i64 = 20;
 
 /// Start Discord OAuth flow.
 pub async fn login(
     State(state): State<Arc<AppState>>,
-    Query(query): Query<LoginQuery>,
 ) -> Result<Redirect, AppError> {
+    // Rate limit: cap pending OAuth states to prevent table flooding
+    let pending_count = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM oauth_states WHERE expires_at > now()",
+    )
+    .fetch_one(&state.pool)
+    .await
+    .unwrap_or(0);
+
+    if pending_count >= MAX_PENDING_OAUTH_STATES {
+        return Err(AppError::BadRequest("Too many login attempts, please try again later".into()));
+    }
+
     let state_param: String = (0..32)
         .map(|_| {
             let idx = rand::random::<usize>() % 36;
@@ -258,15 +267,10 @@ pub async fn login(
         })
         .collect();
 
-    let redirect_data = query
-        .redirect
-        .map(|r| serde_json::json!({"redirect": r}));
-
     sqlx::query(
-        "INSERT INTO oauth_states (state, redirect_data, expires_at) VALUES ($1, $2, now() + interval '10 minutes')",
+        "INSERT INTO oauth_states (state, expires_at) VALUES ($1, now() + interval '10 minutes')",
     )
     .bind(&state_param)
-    .bind(&redirect_data)
     .execute(&state.pool)
     .await?;
 
@@ -340,8 +344,9 @@ pub async fn callback(
     tx.commit().await?;
 
     let session_value = sign_session(&discord_id, &display_name, &state.config.session_secret);
+    let secure_flag = if state.config.base_url.starts_with("https://") { "; Secure" } else { "" };
     let cookie = format!(
-        "{SESSION_COOKIE}={session_value}; Path=/; HttpOnly; SameSite=Lax; Max-Age=3600"
+        "{SESSION_COOKIE}={session_value}; Path=/; HttpOnly; SameSite=Lax; Max-Age=3600{secure_flag}"
     );
     let jar = jar.add(
         axum_extra::extract::cookie::Cookie::parse(cookie)
@@ -384,6 +389,9 @@ pub struct CollectPayload {
     pub max_touch_points: Option<i32>,
 }
 
+/// Minimum seconds between collect calls per user (prevents spam).
+const COLLECT_COOLDOWN_SECS: i64 = 10;
+
 /// Receive visitor identity from client JS + HTTP headers and store it.
 pub async fn collect(
     State(state): State<Arc<AppState>>,
@@ -392,6 +400,24 @@ pub async fn collect(
     Json(payload): Json<CollectPayload>,
 ) -> Result<Json<Value>, AppError> {
     let (discord_id, _) = get_session(&jar, &state.config.session_secret)?;
+
+    // Per-user cooldown: reject if last visit was too recent
+    let last_visit = sqlx::query_scalar::<_, chrono::DateTime<chrono::Utc>>(
+        "SELECT last_visit FROM web_contexts WHERE discord_id = $1",
+    )
+    .bind(&discord_id)
+    .fetch_optional(&state.pool)
+    .await?;
+
+    if let Some(last) = last_visit {
+        let elapsed = (chrono::Utc::now() - last).num_seconds();
+        if elapsed < COLLECT_COOLDOWN_SECS {
+            return Err(AppError::BadRequest(format!(
+                "Please wait {} seconds before refreshing",
+                COLLECT_COOLDOWN_SECS - elapsed
+            )));
+        }
+    }
 
     // Parse UA for browser, platform, device type
     let touch_points = payload.max_touch_points.unwrap_or(0);
@@ -440,18 +466,33 @@ pub async fn collect(
     let raw_data = serde_json::to_value(&payload).unwrap_or_else(|_| json!({}));
 
     // Upsert web context
+    // "Ever" flags use OR logic: once set, they stay true until cooldown expires.
+    // fraud_clean_since tracks when all current flags became clean.
     sqlx::query(
         "INSERT INTO web_contexts (discord_id, raw_data, timezone, utc_offset, country, \
          platform, browser, language, device_type, visit_count, \
          vpn_detected, spoofing_detected, impossible_travel, \
+         vpn_ever_detected, spoofing_ever_detected, impossible_travel_ever_detected, \
+         fraud_clean_since, \
          prev_country, prev_visit_at, \
          user_agent, ip_address, accept_language, first_visit, last_visit) \
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 1, \
-         $10, $11, $12, $13, $14, $15, $16, $17, now(), now()) \
+         $10, $11, $12, $10, $11, $12, \
+         CASE WHEN NOT ($10 OR $11 OR $12) THEN now() ELSE NULL END, \
+         $13, $14, $15, $16, $17, now(), now()) \
          ON CONFLICT (discord_id) DO UPDATE SET \
          raw_data = $2, timezone = $3, utc_offset = $4, country = COALESCE($5, web_contexts.country), \
          platform = $6, browser = $7, language = $8, device_type = $9, \
          vpn_detected = $10, spoofing_detected = $11, impossible_travel = $12, \
+         vpn_ever_detected = web_contexts.vpn_ever_detected OR $10, \
+         spoofing_ever_detected = web_contexts.spoofing_ever_detected OR $11, \
+         impossible_travel_ever_detected = web_contexts.impossible_travel_ever_detected OR $12, \
+         fraud_clean_since = CASE \
+             WHEN ($10 OR $11 OR $12) THEN NULL \
+             WHEN web_contexts.fraud_clean_since IS NOT NULL THEN web_contexts.fraud_clean_since \
+             WHEN NOT (web_contexts.vpn_detected OR web_contexts.spoofing_detected OR web_contexts.impossible_travel) THEN web_contexts.last_visit \
+             ELSE now() \
+         END, \
          prev_country = web_contexts.country, prev_visit_at = web_contexts.last_visit, \
          user_agent = $15, ip_address = COALESCE($16, web_contexts.ip_address), \
          accept_language = COALESCE($17, web_contexts.accept_language), \
@@ -487,11 +528,17 @@ pub async fn collect(
 
     tracing::debug!(discord_id, vpn_detected, spoofing_detected, impossible_travel, "Web context collected");
 
-    let flagged = vpn_detected || spoofing_detected || impossible_travel;
+    // Show a vague hint for VPN users (common innocent case) without revealing detection details.
+    // Spoofing/impossible-travel get no hint — those are almost never accidental.
+    let hint = if vpn_detected {
+        Some("Some roles require a direct internet connection. If you're using a VPN or proxy, try disabling it and clicking Refresh Data.")
+    } else {
+        None
+    };
 
     Ok(Json(json!({
         "success": true,
-        "flagged": flagged,
+        "hint": hint,
         "context": {
             "country": country,
             "timezone": payload.timezone,
