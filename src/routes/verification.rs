@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use axum::extract::{Query, State};
+use axum::extract::State;
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::Json;
@@ -9,17 +9,17 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::error::AppError;
-use crate::services::discord_oauth::{sign_session, verify_session, DiscordOAuth};
+use crate::services::session;
 use crate::services::fraud;
 use crate::services::sync::PlayerSyncEvent;
 use crate::services::ua_parser::parse_user_agent;
 use crate::AppState;
 
-const SESSION_COOKIE: &str = "wur_session";
+const SESSION_COOKIE: &str = "rl_session";
 
 fn get_session(jar: &CookieJar, secret: &str) -> Result<(String, String), AppError> {
     let cookie = jar.get(SESSION_COOKIE).ok_or(AppError::Unauthorized)?;
-    verify_session(cookie.value(), secret).ok_or(AppError::Unauthorized)
+    session::verify_session(cookie.value(), secret).ok_or(AppError::Unauthorized)
 }
 
 /// Extract country code from HTTP headers (reverse proxy / CDN).
@@ -146,7 +146,7 @@ Sign in with Discord
 </div>
 
 <script>
-const BASE = '';
+const BASE = '{base_url}';
 
 function show(id) {{
   ['loading','login','collected'].forEach(s => document.getElementById(s).classList.add('hidden'));
@@ -237,124 +237,13 @@ init();
     )
 }
 
-/// Maximum concurrent pending OAuth states (prevents login spam).
-const MAX_PENDING_OAUTH_STATES: i64 = 20;
-
-/// Start Discord OAuth flow.
+/// Redirect to Auth Gateway for Discord login.
 pub async fn login(
     State(state): State<Arc<AppState>>,
 ) -> Result<Redirect, AppError> {
-    // Rate limit: cap pending OAuth states to prevent table flooding
-    let pending_count = sqlx::query_scalar::<_, i64>(
-        "SELECT COUNT(*) FROM oauth_states WHERE expires_at > now()",
-    )
-    .fetch_one(&state.pool)
-    .await
-    .unwrap_or(0);
-
-    if pending_count >= MAX_PENDING_OAUTH_STATES {
-        return Err(AppError::BadRequest("Too many login attempts, please try again later".into()));
-    }
-
-    let state_param: String = (0..32)
-        .map(|_| {
-            let idx = rand::random::<usize>() % 36;
-            if idx < 10 {
-                (b'0' + idx as u8) as char
-            } else {
-                (b'a' + (idx - 10) as u8) as char
-            }
-        })
-        .collect();
-
-    sqlx::query(
-        "INSERT INTO oauth_states (state, expires_at) VALUES ($1, now() + interval '10 minutes')",
-    )
-    .bind(&state_param)
-    .execute(&state.pool)
-    .await?;
-
-    let url = DiscordOAuth::authorize_url(&state.config, &state_param);
+    let return_to = "/member-origin-role/verify";
+    let url = format!("/auth/login?return_to={}", urlencoding::encode(return_to));
     Ok(Redirect::temporary(&url))
-}
-
-#[derive(Deserialize)]
-pub struct CallbackQuery {
-    code: String,
-    state: String,
-}
-
-/// Handle Discord OAuth callback.
-pub async fn callback(
-    State(state): State<Arc<AppState>>,
-    Query(query): Query<CallbackQuery>,
-    jar: CookieJar,
-) -> Result<(CookieJar, Redirect), AppError> {
-    let oauth_state = sqlx::query_scalar::<_, bool>(
-        "SELECT EXISTS(SELECT 1 FROM oauth_states WHERE state = $1 AND expires_at > now())",
-    )
-    .bind(&query.state)
-    .fetch_one(&state.pool)
-    .await
-    .unwrap_or(false);
-
-    if !oauth_state {
-        return Err(AppError::BadRequest("Invalid or expired OAuth state".into()));
-    }
-
-    sqlx::query("DELETE FROM oauth_states WHERE state = $1")
-        .bind(&query.state)
-        .execute(&state.pool)
-        .await?;
-
-    let oauth = DiscordOAuth::with_client(state.oauth_http.clone());
-    let (access_token, refresh_token) = oauth.exchange_code(&state.config, &query.code).await?;
-    let (discord_id, display_name) = oauth.get_user(&access_token).await?;
-
-    if let Some(rt) = &refresh_token {
-        let _ = sqlx::query(
-            "INSERT INTO discord_tokens (discord_id, refresh_token) VALUES ($1, $2) \
-             ON CONFLICT (discord_id) DO UPDATE SET refresh_token = $2",
-        )
-        .bind(&discord_id)
-        .bind(rt)
-        .execute(&state.pool)
-        .await;
-    }
-
-    let guilds = oauth.get_user_guilds(&access_token).await?;
-    let mut tx = state.pool.begin().await?;
-    sqlx::query("DELETE FROM user_guilds WHERE discord_id = $1")
-        .bind(&discord_id)
-        .execute(&mut *tx)
-        .await?;
-    if !guilds.is_empty() {
-        let guild_ids: Vec<&str> = guilds.iter().map(|(id, _)| id.as_str()).collect();
-        let guild_names: Vec<&str> = guilds.iter().map(|(_, name)| name.as_str()).collect();
-        sqlx::query(
-            "INSERT INTO user_guilds (discord_id, guild_id, guild_name, updated_at) \
-             SELECT $1, UNNEST($2::text[]), UNNEST($3::text[]), now()",
-        )
-        .bind(&discord_id)
-        .bind(&guild_ids)
-        .bind(&guild_names)
-        .execute(&mut *tx)
-        .await?;
-    }
-    tx.commit().await?;
-
-    let session_value = sign_session(&discord_id, &display_name, &state.config.session_secret);
-    let secure_flag = if state.config.base_url.starts_with("https://") { "; Secure" } else { "" };
-    let cookie = format!(
-        "{SESSION_COOKIE}={session_value}; Path=/; HttpOnly; SameSite=Lax; Max-Age=3600{secure_flag}"
-    );
-    let jar = jar.add(
-        axum_extra::extract::cookie::Cookie::parse(cookie)
-            .map_err(|e| AppError::Internal(format!("Cookie parse error: {e}")))?,
-    );
-
-    tracing::info!(discord_id, "User authenticated via OAuth");
-    Ok((jar, Redirect::temporary("/verify")))
 }
 
 /// Return session status and web context summary.
