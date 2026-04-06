@@ -2,9 +2,11 @@
 
 A [RoleLogic](https://rolelogic.faizo.net) plugin that assigns Discord roles based on member origin — country, timezone, and language detected from HTTP headers and browser APIs.
 
+> **Requires [Auth Gateway](../Auth-Gateway/)** — Discord login is handled by the centralized Auth Gateway. This plugin reads the shared `rl_session` cookie set by the gateway.
+
 ## How It Works
 
-1. Members visit the verification page and sign in with Discord
+1. Members visit the verification page and sign in with Discord (via Auth Gateway)
 2. Their origin is automatically detected from HTTP identity signals (IP country, Accept-Language) and browser APIs (timezone)
 3. Admins configure conditions (e.g. Country = US, Timezone = Asia/Tokyo, Language = ja)
 4. Members matching the condition get the role automatically
@@ -50,13 +52,13 @@ docker compose up -d
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `DATABASE_URL` | Yes | PostgreSQL connection string |
-| `DISCORD_CLIENT_ID` | Yes | Discord OAuth application client ID |
-| `DISCORD_CLIENT_SECRET` | Yes | Discord OAuth application client secret |
-| `SESSION_SECRET` | Yes | Random string for session cookie signing |
-| `BASE_URL` | Yes | Public HTTPS URL of this plugin |
+| `SESSION_SECRET` | Yes | HMAC key for `rl_session` cookie (must match Auth Gateway) |
+| `BASE_URL` | Yes | Full URL with prefix, e.g. `https://your-domain.com/member-origin-role` |
 | `LISTEN_ADDR` | No | Bind address (default `0.0.0.0:8080`) |
 
 ### Endpoints
+
+All routes are nested under `/member-origin-role`:
 
 | Method | Path | Purpose |
 |--------|------|---------|
@@ -65,6 +67,7 @@ docker compose up -d
 | `POST` | `/config` | Save admin configuration |
 | `DELETE` | `/config` | Delete role link |
 | `GET` | `/verify` | Verification page (user-facing) |
+| `GET` | `/verify/login` | Redirects to Auth Gateway for Discord login |
 | `GET` | `/health` | Health check |
 
 ## License
