@@ -5,8 +5,9 @@ use sqlx::PgPool;
 
 use crate::error::AppError;
 use crate::models::condition::{ConditionField, ConditionOperator, WebConditions};
+use crate::services::auth_gateway;
 use crate::services::condition_eval::{evaluate, WebContextRow};
-use crate::services::rolelogic::RoleLogicClient;
+use crate::AppState;
 
 /// Events sent to the player sync worker (lightweight, per-user).
 #[derive(Debug, Clone)]
@@ -24,9 +25,11 @@ pub struct ConfigSyncEvent {
 /// Sync roles for a single user across all guilds.
 pub async fn sync_for_player(
     discord_id: &str,
-    pool: &PgPool,
-    rl_client: &RoleLogicClient,
+    state: &AppState,
 ) -> Result<(), AppError> {
+    let pool = &state.pool;
+    let rl_client = &state.rl_client;
+
     let web_ctx = sqlx::query_as::<_, WebContextRow>(
         "SELECT timezone, utc_offset, country, platform, browser, \
          language, device_type, vpn_detected, spoofing_detected, impossible_travel \
@@ -40,13 +43,24 @@ pub async fn sync_for_player(
         return Ok(());
     };
 
+    let guild_ids = auth_gateway::fetch_user_guild_ids(
+        &state.http,
+        &state.config.auth_gateway_url,
+        &state.config.internal_api_key,
+        discord_id,
+    )
+    .await?;
+
+    if guild_ids.is_empty() {
+        return Ok(());
+    }
+
     let role_links = sqlx::query_as::<_, (String, String, String, sqlx::types::Json<WebConditions>)>(
         "SELECT rl.guild_id, rl.role_id, rl.api_token, rl.conditions \
          FROM role_links rl \
-         JOIN user_guilds ug ON ug.guild_id = rl.guild_id \
-         WHERE ug.discord_id = $1",
+         WHERE rl.guild_id = ANY($1)",
     )
-    .bind(discord_id)
+    .bind(&guild_ids[..])
     .fetch_all(pool)
     .await?;
 
@@ -204,9 +218,11 @@ enum ConditionBind {
 pub async fn sync_for_role_link(
     guild_id: &str,
     role_id: &str,
-    pool: &PgPool,
-    rl_client: &RoleLogicClient,
+    state: &AppState,
 ) -> Result<(), AppError> {
+    let pool = &state.pool;
+    let rl_client = &state.rl_client;
+
     let link = sqlx::query_as::<_, (String, sqlx::types::Json<WebConditions>)>(
         "SELECT api_token, conditions FROM role_links WHERE guild_id = $1 AND role_id = $2",
     )
@@ -219,6 +235,24 @@ pub async fn sync_for_role_link(
         return Ok(());
     };
 
+    let member_ids = auth_gateway::fetch_guild_member_ids(
+        &state.http,
+        &state.config.auth_gateway_url,
+        &state.config.internal_api_key,
+        guild_id,
+    )
+    .await?;
+
+    if member_ids.is_empty() {
+        rl_client.replace_users(guild_id, role_id, &[], &api_token).await?;
+        let mut tx = pool.begin().await?;
+        sqlx::query("DELETE FROM role_assignments WHERE guild_id = $1 AND role_id = $2")
+            .bind(guild_id).bind(role_id)
+            .execute(&mut *tx).await?;
+        tx.commit().await?;
+        return Ok(());
+    }
+
     let (_user_count, user_limit) = rl_client
         .get_user_info(guild_id, role_id, &api_token)
         .await
@@ -226,26 +260,26 @@ pub async fn sync_for_role_link(
 
     let (where_clause, binds) = build_condition_where(&conditions);
 
-    let guild_bind_idx = binds.len() + 1;
+    let members_bind_idx = binds.len() + 1;
     let limit_bind_idx = binds.len() + 2;
     let query_str = format!(
         "SELECT wc.discord_id \
          FROM web_contexts wc \
-         JOIN user_guilds ug ON ug.discord_id = wc.discord_id AND ug.guild_id = ${guild_bind_idx} \
-         WHERE {where_clause} \
+         WHERE wc.discord_id = ANY(${members_bind_idx}::text[]) \
+           AND ({where_clause}) \
          ORDER BY wc.first_visit ASC \
          LIMIT ${limit_bind_idx}",
     );
 
-    let qualifying_ids = exec_condition_query(&query_str, &binds, guild_id, user_limit, pool).await?;
+    let qualifying_ids = exec_condition_query(&query_str, &binds, &member_ids, user_limit, pool).await?;
 
     if !qualifying_ids.is_empty() && qualifying_ids.len() == user_limit {
         let count_query = format!(
             "SELECT COUNT(*) FROM web_contexts wc \
-             JOIN user_guilds ug ON ug.discord_id = wc.discord_id AND ug.guild_id = ${guild_bind_idx} \
-             WHERE {where_clause}",
+             WHERE wc.discord_id = ANY(${members_bind_idx}::text[]) \
+               AND ({where_clause})",
         );
-        let total: i64 = exec_condition_count(&count_query, &binds, guild_id, pool)
+        let total: i64 = exec_condition_count(&count_query, &binds, &member_ids, pool)
             .await
             .unwrap_or(qualifying_ids.len() as i64);
         if total as usize > user_limit {
@@ -281,7 +315,7 @@ pub async fn sync_for_role_link(
 async fn exec_condition_query(
     query: &str,
     binds: &[ConditionBind],
-    guild_id: &str,
+    member_ids: &[String],
     limit: usize,
     pool: &PgPool,
 ) -> Result<Vec<String>, AppError> {
@@ -292,7 +326,7 @@ async fn exec_condition_query(
             ConditionBind::Text(v) => q.bind(v),
         };
     }
-    q = q.bind(guild_id);
+    q = q.bind(member_ids);
     q = q.bind(limit as i64);
     Ok(q.fetch_all(pool).await?)
 }
@@ -300,7 +334,7 @@ async fn exec_condition_query(
 async fn exec_condition_count(
     query: &str,
     binds: &[ConditionBind],
-    guild_id: &str,
+    member_ids: &[String],
     pool: &PgPool,
 ) -> Result<i64, AppError> {
     let mut q = sqlx::query_scalar::<_, i64>(query);
@@ -310,15 +344,17 @@ async fn exec_condition_count(
             ConditionBind::Text(v) => q.bind(v),
         };
     }
-    q = q.bind(guild_id);
+    q = q.bind(member_ids);
     Ok(q.fetch_one(pool).await?)
 }
 
 pub async fn remove_all_assignments(
     discord_id: &str,
-    pool: &PgPool,
-    rl_client: &RoleLogicClient,
+    state: &AppState,
 ) -> Result<(), AppError> {
+    let pool = &state.pool;
+    let rl_client = &state.rl_client;
+
     let assignments = sqlx::query_as::<_, (String, String, String)>(
         "SELECT ra.guild_id, ra.role_id, rl.api_token \
          FROM role_assignments ra \

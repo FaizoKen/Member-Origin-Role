@@ -12,7 +12,7 @@ pub async fn run(mut rx: mpsc::Receiver<PlayerSyncEvent>, state: Arc<AppState>) 
         let PlayerSyncEvent::DataCollected { ref discord_id } = event;
         tracing::debug!(discord_id, "Syncing roles for user");
 
-        if let Err(e) = sync::sync_for_player(discord_id, &state.pool, &state.rl_client).await {
+        if let Err(e) = sync::sync_for_player(discord_id, &state).await {
             tracing::error!(discord_id, "Player sync failed: {e}");
         }
     }

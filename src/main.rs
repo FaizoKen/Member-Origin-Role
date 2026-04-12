@@ -79,8 +79,6 @@ async fn main() {
         config_sync_rx,
         Arc::clone(&state),
     ));
-    tokio::spawn(tasks::cleanup_expired(Arc::clone(&state)));
-
     let app = Router::new()
         .nest("/member-origin-role", Router::new()
             // Plugin endpoints (called by RoleLogic)
