@@ -18,6 +18,15 @@ pub struct WebContextRow {
 /// Evaluate conditions against web context. All enabled checks are AND'd.
 /// Fraud checks use current-visit flags so roles update immediately when the issue clears.
 pub fn evaluate(conditions: &WebConditions, ctx: &WebContextRow) -> bool {
+    // Unconfigured (no identity, no fraud checks) → grant to nobody.
+    let has_identity = ConditionField::from_key(&conditions.field).is_some();
+    let has_fraud = conditions.block_vpn
+        || conditions.block_spoofing
+        || conditions.block_impossible_travel;
+    if !has_identity && !has_fraud {
+        return false;
+    }
+
     // Fraud checks first (early exit) — use current flags
     if conditions.block_vpn && ctx.vpn_detected {
         return false;
@@ -31,7 +40,7 @@ pub fn evaluate(conditions: &WebConditions, ctx: &WebContextRow) -> bool {
 
     // Identity condition
     let Some(field) = ConditionField::from_key(&conditions.field) else {
-        return true; // no identity condition configured → all pass
+        return true; // no identity condition, but fraud checks configured and passed
     };
     let Some(operator) = ConditionOperator::from_key(&conditions.operator) else {
         return true;

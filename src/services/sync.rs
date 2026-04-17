@@ -235,6 +235,19 @@ pub async fn sync_for_role_link(
         return Ok(());
     };
 
+    // Unconfigured (no identity, no fraud checks) → grant to nobody.
+    let has_identity = ConditionField::from_key(&conditions.field).is_some();
+    let has_fraud = conditions.block_vpn
+        || conditions.block_spoofing
+        || conditions.block_impossible_travel;
+    if !has_identity && !has_fraud {
+        rl_client.replace_users(guild_id, role_id, &[], &api_token).await?;
+        sqlx::query("DELETE FROM role_assignments WHERE guild_id = $1 AND role_id = $2")
+            .bind(guild_id).bind(role_id)
+            .execute(pool).await?;
+        return Ok(());
+    }
+
     let member_ids = auth_gateway::fetch_guild_member_ids(
         &state.http,
         &state.config.auth_gateway_url,
