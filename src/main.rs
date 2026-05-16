@@ -29,6 +29,7 @@ pub struct AppState {
     pub rl_client: RoleLogicClient,
     pub http: reqwest::Client,
     pub verify_html: bytes::Bytes,
+    pub verify_anonymous_html: bytes::Bytes,
 }
 
 #[tokio::main]
@@ -59,6 +60,8 @@ async fn main() {
         .expect("Failed to build HTTP client");
     let verify_html =
         bytes::Bytes::from(routes::verification::render_verify_page(&app_config.base_url));
+    let verify_anonymous_html =
+        bytes::Bytes::from(routes::verification::render_verify_anonymous_page(&app_config.base_url));
 
     let state = Arc::new(AppState {
         pool,
@@ -68,6 +71,7 @@ async fn main() {
         rl_client,
         http,
         verify_html,
+        verify_anonymous_html,
     });
 
     // Spawn background workers

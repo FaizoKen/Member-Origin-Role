@@ -14,6 +14,7 @@ pub fn build_config_schema(conditions: &WebConditions, verify_url: &str) -> Valu
     values.insert("block_vpn".into(), json!(conditions.block_vpn));
     values.insert("block_spoofing".into(), json!(conditions.block_spoofing));
     values.insert("block_impossible_travel".into(), json!(conditions.block_impossible_travel));
+    values.insert("anonymous_mode".into(), json!(conditions.anonymous_mode));
 
     // Populate value for the specific field type
     if !conditions.field.is_empty() {
@@ -196,6 +197,19 @@ pub fn build_config_schema(conditions: &WebConditions, verify_url: &str) -> Valu
                 ]
             },
             {
+                "title": "Silent Verification",
+                "description": "Quick verify mode for admins who want to confirm a member's identity without showing them what was collected. Default: ON.",
+                "fields": [
+                    {
+                        "type": "toggle",
+                        "key": "anonymous_mode",
+                        "label": "Anonymous mode",
+                        "default_value": true,
+                        "description": "When ON (default), the verify page shows only a generic 'You're all set' message — no country, timezone, browser, or other detected data is shown back to the user. The page also auto-redirects to Discord login immediately (no 'Sign in' button to click), so the flow is one click: member opens the link, signs in, done. Detection and role assignment work exactly the same; only the UI changes. Turn OFF to show members what was detected."
+                    }
+                ]
+            },
+            {
                 "title": "Anti-Fraud",
                 "description": "Block suspicious visitors. These checks are AND'd with the identity condition above.",
                 "fields": [
@@ -330,6 +344,10 @@ pub fn parse_config(config: &HashMap<String, Value>) -> Result<WebConditions, Ap
         .get("block_impossible_travel")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+    let anonymous_mode = config
+        .get("anonymous_mode")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
 
     Ok(WebConditions {
         field: field_key.to_string(),
@@ -339,6 +357,7 @@ pub fn parse_config(config: &HashMap<String, Value>) -> Result<WebConditions, Ap
         block_vpn,
         block_spoofing,
         block_impossible_travel,
+        anonymous_mode,
     })
 }
 

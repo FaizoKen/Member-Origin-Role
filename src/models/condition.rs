@@ -26,6 +26,16 @@ pub struct WebConditions {
     /// Block users whose IP country changed too fast between visits
     #[serde(default)]
     pub block_impossible_travel: bool,
+
+    /// Silent verify mode: hide collected data from the user and skip the
+    /// "Sign in with Discord" button (auto-bounce to login). Same /verify URL.
+    /// Defaults to true — admins must opt out to show users what was detected.
+    #[serde(default = "default_true")]
+    pub anonymous_mode: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, PartialEq)]

@@ -75,11 +75,31 @@ fn extract_language_from_header(headers: &HeaderMap) -> Option<String> {
 }
 
 /// Serve the verification SPA page.
+///
+/// If any role link in this deployment has `anonymous_mode = true`, serve the
+/// silent variant: no data display, auto-bounce to Discord login, generic
+/// "You're all set" message. Otherwise serve the standard transparent page.
 pub async fn verify_page(State(state): State<Arc<AppState>>) -> Response {
+    // Default-silent: render the anonymous page unless some role_link has
+    // explicitly opted out (anonymous_mode = false). Missing key = silent.
+    let anonymous = sqlx::query_scalar::<_, bool>(
+        "SELECT NOT EXISTS(SELECT 1 FROM role_links \
+         WHERE (conditions->>'anonymous_mode') = 'false')",
+    )
+    .fetch_one(&state.pool)
+    .await
+    .unwrap_or(true);
+
+    let body = if anonymous {
+        state.verify_anonymous_html.clone()
+    } else {
+        state.verify_html.clone()
+    };
+
     (
         StatusCode::OK,
         [(header::CONTENT_TYPE, "text/html; charset=utf-8")],
-        state.verify_html.clone(),
+        body,
     )
         .into_response()
 }
@@ -93,6 +113,8 @@ pub fn render_verify_page(base_url: &str) -> String {
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Member Origin Role — Verify</title>
+<link rel="icon" type="image/x-icon" href="{base_url}/favicon.ico">
+<link rel="shortcut icon" type="image/x-icon" href="{base_url}/favicon.ico">
 <meta property="og:title" content="Member Origin Role — Verify">
 <meta property="og:description" content="Sign in with Discord to verify your identity for automatic role assignment.">
 <style>
@@ -231,6 +253,113 @@ async function init() {{
 }}
 
 init();
+</script>
+</body>
+</html>"##
+    )
+}
+
+/// Render the silent / anonymous-mode HTML for the verification flow.
+///
+/// Behaviour vs. the standard page:
+///   - No collected-data grid (Country, Timezone, etc.) is rendered.
+///   - No "Sign in with Discord" button — the page auto-redirects to login.
+///   - On success, shows a generic "You're all set" message only.
+///   - Cooldown errors on /verify/collect are swallowed (data already exists).
+pub fn render_verify_anonymous_page(base_url: &str) -> String {
+    format!(
+        r##"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Welcome</title>
+<link rel="icon" type="image/x-icon" href="{base_url}/favicon.ico">
+<link rel="shortcut icon" type="image/x-icon" href="{base_url}/favicon.ico">
+<meta property="og:title" content="Welcome">
+<meta property="og:description" content="Confirming access.">
+<style>
+*{{margin:0;padding:0;box-sizing:border-box}}
+body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#0e1525;color:#c9d1d9;min-height:100vh;display:flex;align-items:center;justify-content:center}}
+.box{{text-align:center;padding:2rem;max-width:420px}}
+h1{{font-size:1.4rem;color:#e6edf3;margin-bottom:.6rem;font-weight:600}}
+p{{color:#8b949e;font-size:.95rem;line-height:1.5}}
+.spinner{{width:32px;height:32px;border:3px solid #30363d;border-top-color:#58a6ff;border-radius:50%;animation:spin .6s linear infinite;margin:0 auto 1.25rem}}
+@keyframes spin{{to{{transform:rotate(360deg)}}}}
+.check{{font-size:3rem;color:#3fb950;margin-bottom:1rem;line-height:1}}
+.x{{font-size:3rem;color:#f85149;margin-bottom:1rem;line-height:1}}
+.hidden{{display:none}}
+</style>
+</head>
+<body>
+<div class="box">
+<div id="loading">
+<div class="spinner"></div>
+<h1>Just a moment...</h1>
+<p>Confirming your access.</p>
+</div>
+<div id="done" class="hidden">
+<div class="check">&#10003;</div>
+<h1>You're all set!</h1>
+<p>You can close this tab.</p>
+</div>
+<div id="error" class="hidden">
+<div class="x">!</div>
+<h1>Something went wrong</h1>
+<p id="error-msg">Please try again.</p>
+</div>
+</div>
+
+<script>
+const BASE = '{base_url}';
+
+function show(id) {{
+  ['loading','done','error'].forEach(s => document.getElementById(s).classList.add('hidden'));
+  document.getElementById(id).classList.remove('hidden');
+}}
+
+async function run() {{
+  let signedIn = false;
+  try {{
+    const r = await fetch(BASE + '/verify/status', {{ credentials: 'include' }});
+    signedIn = r.ok;
+  }} catch(e) {{}}
+
+  if (!signedIn) {{
+    window.location.replace(BASE + '/verify/login');
+    return;
+  }}
+
+  try {{
+    const payload = {{
+      user_agent: navigator.userAgent,
+      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+      timezone_offset: new Date().getTimezoneOffset(),
+      language: navigator.language,
+      max_touch_points: navigator.maxTouchPoints || 0,
+    }};
+    const res = await fetch(BASE + '/verify/collect', {{
+      method: 'POST',
+      credentials: 'include',
+      headers: {{ 'Content-Type': 'application/json' }},
+      body: JSON.stringify(payload),
+    }});
+    // 400 from cooldown is fine — data already on file. Anything else surfaces.
+    if (!res.ok && res.status !== 400) {{
+      let msg = 'Please try again.';
+      try {{ const d = await res.json(); if (d && d.error) msg = d.error; }} catch(e) {{}}
+      document.getElementById('error-msg').textContent = msg;
+      show('error');
+      return;
+    }}
+    show('done');
+  }} catch(e) {{
+    document.getElementById('error-msg').textContent = e.message || 'Network error.';
+    show('error');
+  }}
+}}
+
+run();
 </script>
 </body>
 </html>"##
