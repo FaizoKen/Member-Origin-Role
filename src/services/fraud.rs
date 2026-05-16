@@ -320,6 +320,22 @@ fn country_to_continent(code: &str) -> Option<&'static str> {
     }
 }
 
+// ─── Discord Account Age ─────────────────────────────────────────────────────
+
+/// Discord epoch: 2015-01-01T00:00:00.000Z in ms since Unix epoch.
+const DISCORD_EPOCH_MS: i64 = 1_420_070_400_000;
+
+/// Decode a Discord snowflake into the account's creation time.
+///
+/// Snowflake layout: the top 42 bits are the timestamp in ms since the
+/// Discord epoch. `creation_ms = (snowflake >> 22) + DISCORD_EPOCH_MS`.
+/// Returns `None` if the input isn't a parseable snowflake.
+pub fn snowflake_to_created_at(discord_id: &str) -> Option<DateTime<Utc>> {
+    let id: u64 = discord_id.parse().ok()?;
+    let creation_ms = ((id >> 22) as i64).checked_add(DISCORD_EPOCH_MS)?;
+    DateTime::<Utc>::from_timestamp_millis(creation_ms)
+}
+
 // ─── Impossible Travel Detection ─────────────────────────────────────────────
 
 /// Detect if country changed too fast between visits to be physically possible.
@@ -557,5 +573,30 @@ mod tests {
     #[test]
     fn test_no_prev_country() {
         assert!(!detect_impossible_travel(Some("US"), None, None, Utc::now()));
+    }
+
+    // ── Discord snowflake → created_at ──
+
+    #[test]
+    fn test_snowflake_known_value() {
+        // Canonical example from Discord's API docs: snowflake 175928847299117063
+        // decodes to 2016-04-30T11:18:25.796Z.
+        let created = snowflake_to_created_at("175928847299117063").unwrap();
+        assert_eq!(created.format("%Y-%m-%d").to_string(), "2016-04-30");
+        assert_eq!(created.timestamp_millis(), 1_462_015_105_796);
+    }
+
+    #[test]
+    fn test_snowflake_after_discord_epoch() {
+        // Any valid snowflake decodes to a time >= 2015-01-01.
+        let created = snowflake_to_created_at("123456789012345678").unwrap();
+        let epoch = DateTime::<Utc>::from_timestamp_millis(DISCORD_EPOCH_MS).unwrap();
+        assert!(created >= epoch);
+    }
+
+    #[test]
+    fn test_snowflake_invalid_returns_none() {
+        assert!(snowflake_to_created_at("not-a-number").is_none());
+        assert!(snowflake_to_created_at("").is_none());
     }
 }

@@ -32,7 +32,8 @@ pub async fn sync_for_player(
 
     let web_ctx = sqlx::query_as::<_, WebContextRow>(
         "SELECT timezone, utc_offset, country, platform, browser, \
-         language, device_type, vpn_detected, spoofing_detected, impossible_travel \
+         language, device_type, vpn_detected, vpn_asn_detected, \
+         spoofing_detected, impossible_travel, account_created_at \
          FROM web_contexts WHERE discord_id = $1",
     )
     .bind(discord_id)
@@ -234,14 +235,23 @@ fn build_condition_where(conditions: &WebConditions) -> (String, Vec<ConditionBi
     let mut binds: Vec<ConditionBind> = Vec::new();
 
     // Fraud toggles — use current-visit flags so roles update immediately when cleared.
+    // block_vpn covers both the timezone-mismatch heuristic and the ASN lookup.
     if conditions.block_vpn {
-        clauses.push("NOT wc.vpn_detected".to_string());
+        clauses.push("NOT wc.vpn_detected AND NOT wc.vpn_asn_detected".to_string());
     }
     if conditions.block_spoofing {
         clauses.push("NOT wc.spoofing_detected".to_string());
     }
     if conditions.block_impossible_travel {
         clauses.push("NOT wc.impossible_travel".to_string());
+    }
+    if conditions.min_account_age_days > 0 {
+        // account_created_at IS NULL = unknown age = treat as fail.
+        clauses.push(format!(
+            "wc.account_created_at IS NOT NULL \
+             AND wc.account_created_at <= now() - interval '{} days'",
+            conditions.min_account_age_days
+        ));
     }
 
     // Identity condition
@@ -315,7 +325,8 @@ pub async fn sync_for_role_link(
     let has_identity = ConditionField::from_key(&conditions.field).is_some();
     let has_fraud = conditions.block_vpn
         || conditions.block_spoofing
-        || conditions.block_impossible_travel;
+        || conditions.block_impossible_travel
+        || conditions.min_account_age_days > 0;
     if !has_identity && !has_fraud {
         match rl_client.replace_users(guild_id, role_id, &[], &api_token).await {
             Ok(_) => {}

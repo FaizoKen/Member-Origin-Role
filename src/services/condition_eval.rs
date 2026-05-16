@@ -1,3 +1,5 @@
+use chrono::{DateTime, Utc};
+
 use crate::models::condition::{ConditionField, ConditionOperator, WebConditions};
 
 /// Row data from web_contexts table for in-memory evaluation.
@@ -11,8 +13,10 @@ pub struct WebContextRow {
     pub language: Option<String>,
     pub device_type: Option<String>,
     pub vpn_detected: bool,
+    pub vpn_asn_detected: bool,
     pub spoofing_detected: bool,
     pub impossible_travel: bool,
+    pub account_created_at: Option<DateTime<Utc>>,
 }
 
 /// Evaluate conditions against web context. All enabled checks are AND'd.
@@ -22,13 +26,16 @@ pub fn evaluate(conditions: &WebConditions, ctx: &WebContextRow) -> bool {
     let has_identity = ConditionField::from_key(&conditions.field).is_some();
     let has_fraud = conditions.block_vpn
         || conditions.block_spoofing
-        || conditions.block_impossible_travel;
+        || conditions.block_impossible_travel
+        || conditions.min_account_age_days > 0;
     if !has_identity && !has_fraud {
         return false;
     }
 
-    // Fraud checks first (early exit) — use current flags
-    if conditions.block_vpn && ctx.vpn_detected {
+    // Fraud checks first (early exit) — use current flags.
+    // block_vpn covers both the timezone-mismatch heuristic AND the ASN lookup
+    // so admins keep a single toggle for "no proxies."
+    if conditions.block_vpn && (ctx.vpn_detected || ctx.vpn_asn_detected) {
         return false;
     }
     if conditions.block_spoofing && ctx.spoofing_detected {
@@ -36,6 +43,15 @@ pub fn evaluate(conditions: &WebConditions, ctx: &WebContextRow) -> bool {
     }
     if conditions.block_impossible_travel && ctx.impossible_travel {
         return false;
+    }
+    if conditions.min_account_age_days > 0 {
+        let Some(created) = ctx.account_created_at else {
+            return false; // unknown age + a minimum was set → deny
+        };
+        let age_days = (Utc::now() - created).num_days();
+        if age_days < conditions.min_account_age_days as i64 {
+            return false;
+        }
     }
 
     // Identity condition
@@ -107,8 +123,12 @@ mod tests {
             language: Some("en-US".to_string()),
             device_type: Some("Desktop".to_string()),
             vpn_detected: false,
+            vpn_asn_detected: false,
             spoofing_detected: false,
             impossible_travel: false,
+            // Anything older than ~2 years so age-gate tests with reasonable
+            // thresholds pass without being flaky.
+            account_created_at: Some(Utc::now() - chrono::Duration::days(1000)),
         }
     }
 
@@ -118,9 +138,7 @@ mod tests {
             operator: op.to_string(),
             value,
             value_end: None,
-            block_vpn: false,
-            block_spoofing: false,
-            block_impossible_travel: false,
+            ..Default::default()
         }
     }
 
@@ -151,9 +169,7 @@ mod tests {
             operator: "between".to_string(),
             value: json!(-480),
             value_end: Some(json!(-240)),
-            block_vpn: false,
-            block_spoofing: false,
-            block_impossible_travel: false,
+            ..Default::default()
         };
         assert!(evaluate(&c, &sample_context()));
     }
@@ -166,9 +182,11 @@ mod tests {
     }
 
     #[test]
-    fn test_no_condition_always_true() {
+    fn test_unconfigured_grants_to_nobody() {
+        // No identity field and no fraud checks → deny (documented behavior:
+        // "Unconfigured → grant to nobody"). The old name/assertion was stale.
         let c = WebConditions::default();
-        assert!(evaluate(&c, &sample_context()));
+        assert!(!evaluate(&c, &sample_context()));
     }
 
     // --- Fraud toggle tests ---
@@ -236,5 +254,59 @@ mod tests {
         c.block_vpn = true;
         c.block_spoofing = true;
         assert!(!evaluate(&c, &sample_context())); // identity fails
+    }
+
+    // --- Advanced fraud tests ---
+
+    #[test]
+    fn test_block_vpn_catches_asn_only() {
+        // VPN heuristic clean but ASN flagged → still blocked when block_vpn=true.
+        let mut c = cond("country", "eq", json!("US"));
+        c.block_vpn = true;
+        let mut ctx = sample_context();
+        ctx.vpn_detected = false;
+        ctx.vpn_asn_detected = true;
+        assert!(!evaluate(&c, &ctx));
+    }
+
+    #[test]
+    fn test_asn_flag_ignored_when_toggle_off() {
+        let c = cond("country", "eq", json!("US")); // block_vpn = false
+        let mut ctx = sample_context();
+        ctx.vpn_asn_detected = true;
+        assert!(evaluate(&c, &ctx));
+    }
+
+    #[test]
+    fn test_account_age_passes_when_old_enough() {
+        let mut c = cond("country", "eq", json!("US"));
+        c.min_account_age_days = 30;
+        assert!(evaluate(&c, &sample_context())); // sample is 1000 days old
+    }
+
+    #[test]
+    fn test_account_age_blocks_when_too_new() {
+        let mut c = cond("country", "eq", json!("US"));
+        c.min_account_age_days = 30;
+        let mut ctx = sample_context();
+        ctx.account_created_at = Some(Utc::now() - chrono::Duration::days(5));
+        assert!(!evaluate(&c, &ctx));
+    }
+
+    #[test]
+    fn test_account_age_unknown_blocks_when_required() {
+        let mut c = cond("country", "eq", json!("US"));
+        c.min_account_age_days = 30;
+        let mut ctx = sample_context();
+        ctx.account_created_at = None;
+        assert!(!evaluate(&c, &ctx));
+    }
+
+    #[test]
+    fn test_account_age_unknown_passes_when_disabled() {
+        let c = cond("country", "eq", json!("US")); // min = 0
+        let mut ctx = sample_context();
+        ctx.account_created_at = None;
+        assert!(evaluate(&c, &ctx));
     }
 }

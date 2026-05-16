@@ -29,6 +29,7 @@ fn sort_column(key: &str) -> Option<&'static str> {
         "platform"          => Some("wc.platform"),
         "browser"           => Some("wc.browser"),
         "device_type"       => Some("wc.device_type"),
+        "account_created_at"=> Some("wc.account_created_at"),
         "visit_count"       => Some("wc.visit_count"),
         "last_visit"        => Some("wc.last_visit"),
         _ => None,
@@ -90,6 +91,7 @@ pub fn render_members_page(base_url: &str) -> String {
         .col-date {{ color: #64748b; font-size: 12px; }}
         .flag {{ display: inline-block; padding: 1px 7px; border-radius: 4px; font-size: 10px; font-weight: 600; margin-right: 3px; text-transform: uppercase; letter-spacing: .03em; }}
         .flag-vpn {{ background: #3d1f1f; color: #fca5a5; border: 1px solid #7f1d1d; }}
+        .flag-asn {{ background: #3d1f1f; color: #fda4af; border: 1px solid #9f1239; cursor: help; }}
         .flag-spoof {{ background: #3d2a0f; color: #fbbf24; border: 1px solid #92400e; }}
         .flag-travel {{ background: #2a1f3d; color: #c084fc; border: 1px solid #5b21b6; }}
         .flag-clean {{ color: #475569; font-size: 11px; }}
@@ -159,6 +161,7 @@ pub fn render_members_page(base_url: &str) -> String {
                             <th data-key="platform">Platform</th>
                             <th data-key="browser">Browser</th>
                             <th data-key="device_type">Device</th>
+                            <th data-key="account_created_at">Acct Age</th>
                             <th>Fraud</th>
                             <th data-key="visit_count" class="col-num">Visits</th>
                             <th data-key="last_visit">Last Visit</th>
@@ -214,9 +217,21 @@ pub fn render_members_page(base_url: &str) -> String {
         return d.innerHTML;
     }}
 
+    function acctAge(iso) {{
+        if (!iso) return '-';
+        const days = Math.floor((Date.now() - new Date(iso).getTime()) / 86400000);
+        if (days < 0) return '-';
+        if (days < 31) return days + 'd';
+        if (days < 365) return Math.floor(days / 30) + 'mo';
+        const y = Math.floor(days / 365);
+        const m = Math.floor((days % 365) / 30);
+        return y + 'y' + (m ? ' ' + m + 'mo' : '');
+    }}
+
     function renderFlags(p) {{
         const flags = [];
         if (p.vpn_detected) flags.push('<span class="flag flag-vpn">VPN</span>');
+        if (p.vpn_asn_detected) flags.push('<span class="flag flag-asn" title="' + esc(p.asn_org || 'Flagged ASN/proxy') + '">VPN-ASN</span>');
         if (p.spoofing_detected) flags.push('<span class="flag flag-spoof">SPOOF</span>');
         if (p.impossible_travel) flags.push('<span class="flag flag-travel">TRAVEL</span>');
         return flags.length ? flags.join('') : '<span class="flag-clean">clean</span>';
@@ -245,6 +260,7 @@ pub fn render_members_page(base_url: &str) -> String {
                 '<td>' + esc(p.platform || '-') + '</td>' +
                 '<td>' + esc(p.browser || '-') + '</td>' +
                 '<td>' + esc(p.device_type || '-') + '</td>' +
+                '<td class="col-date">' + acctAge(p.account_created_at) + '</td>' +
                 '<td>' + renderFlags(p) + '</td>' +
                 '<td class="col-num">' + (p.visit_count || 0) + '</td>' +
                 '<td class="col-date">' + timeAgo(p.last_visit) + '</td>';
@@ -549,8 +565,11 @@ pub async fn members_data(
                 wc.device_type, \
                 wc.visit_count, \
                 wc.vpn_detected, \
+                wc.vpn_asn_detected, \
+                wc.asn_org, \
                 wc.spoofing_detected, \
                 wc.impossible_travel, \
+                wc.account_created_at, \
                 wc.first_visit, \
                 wc.last_visit, \
                 COUNT(*) OVER() AS total_count \
@@ -598,6 +617,8 @@ pub async fn members_data(
         .map(|r| {
             let last_visit: chrono::DateTime<chrono::Utc> = r.get("last_visit");
             let first_visit: chrono::DateTime<chrono::Utc> = r.get("first_visit");
+            let account_created_at: Option<chrono::DateTime<chrono::Utc>> =
+                r.get("account_created_at");
             json!({
                 "discord_id":       r.get::<String, _>("discord_id"),
                 "discord_name":     r.get::<Option<String>, _>("discord_name"),
@@ -610,8 +631,11 @@ pub async fn members_data(
                 "device_type":      r.get::<Option<String>, _>("device_type"),
                 "visit_count":      r.get::<i32, _>("visit_count"),
                 "vpn_detected":     r.get::<bool, _>("vpn_detected"),
+                "vpn_asn_detected": r.get::<bool, _>("vpn_asn_detected"),
+                "asn_org":          r.get::<Option<String>, _>("asn_org"),
                 "spoofing_detected":r.get::<bool, _>("spoofing_detected"),
                 "impossible_travel":r.get::<bool, _>("impossible_travel"),
+                "account_created_at": account_created_at,
                 "first_visit":      first_visit,
                 "last_visit":       last_visit,
             })

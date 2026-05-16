@@ -27,6 +27,11 @@ pub struct WebConditions {
     #[serde(default)]
     pub block_impossible_travel: bool,
 
+    /// Reject Discord accounts younger than this many days. 0 disables the check.
+    /// Account age comes from the Discord snowflake — no API call needed.
+    #[serde(default)]
+    pub min_account_age_days: i32,
+
     /// Silent verify mode: hide collected data from the user and skip the
     /// "Sign in with Discord" button (auto-bounce to login). Same /verify URL.
     /// Defaults to true — admins must opt out to show users what was detected.

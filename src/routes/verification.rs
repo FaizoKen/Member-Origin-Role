@@ -104,8 +104,24 @@ pub async fn verify_page(State(state): State<Arc<AppState>>) -> Response {
         .into_response()
 }
 
+/// Build the three Turnstile template fragments: the head `<script>`, the
+/// widget `<div>`, and the JS-enabled flag. All empty/"false" when unset.
+fn turnstile_fragments(site_key: Option<&str>) -> (&'static str, String, &'static str) {
+    match site_key {
+        Some(k) => (
+            r#"<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>"#,
+            format!(
+                r#"<div class="cf-turnstile" data-sitekey="{k}" data-callback="onTurnstileOK" data-error-callback="onTurnstileErr" data-expired-callback="onTurnstileErr" data-theme="dark"></div>"#
+            ),
+            "true",
+        ),
+        None => ("", String::new(), "false"),
+    }
+}
+
 /// Render the full HTML page for the verification flow.
-pub fn render_verify_page(base_url: &str) -> String {
+pub fn render_verify_page(base_url: &str, turnstile_site_key: Option<&str>) -> String {
+    let (ts_head, ts_widget, ts_enabled) = turnstile_fragments(turnstile_site_key);
     format!(
         r##"<!DOCTYPE html>
 <html lang="en">
@@ -117,6 +133,7 @@ pub fn render_verify_page(base_url: &str) -> String {
 <link rel="shortcut icon" type="image/x-icon" href="{base_url}/favicon.ico">
 <meta property="og:title" content="Member Origin Role — Verify">
 <meta property="og:description" content="Sign in with Discord to verify your identity for automatic role assignment.">
+{ts_head}
 <style>
 *{{margin:0;padding:0;box-sizing:border-box}}
 body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#0e1525;color:#c9d1d9;min-height:100vh;display:flex;align-items:center;justify-content:center}}
@@ -149,6 +166,7 @@ h1{{font-size:1.5rem;color:#e6edf3;margin-bottom:.5rem}}
 <p class="subtitle">Sign in with Discord to verify your identity for automatic role assignment.</p>
 <div id="msg" class="hidden"></div>
 <div id="loading"><span class="spinner"></span> Loading...</div>
+<div style="display:flex;justify-content:center;margin:.5rem 0">{ts_widget}</div>
 <div id="login" class="hidden">
 <a class="btn btn-discord" href="{base_url}/verify/login">
 <svg width="20" height="20" viewBox="0 0 71 55" fill="white" style="margin-right:8px"><path d="M60.1 4.9A58.5 58.5 0 0045.4.2a.2.2 0 00-.2.1 40.8 40.8 0 00-1.8 3.7 54 54 0 00-16.2 0A26.5 26.5 0 0025.4.3a.2.2 0 00-.2-.1A58.4 58.4 0 0010.5 4.9a.2.2 0 00-.1.1C1.5 18 -.9 30.6.3 43a.2.2 0 00.1.2 58.7 58.7 0 0017.7 9 .2.2 0 00.3-.1 42 42 0 003.6-5.9.2.2 0 00-.1-.3 38.6 38.6 0 01-5.5-2.6.2.2 0 01 0-.4l1.1-.9a.2.2 0 01.2 0 41.9 41.9 0 0035.6 0 .2.2 0 01.2 0l1.1.9a.2.2 0 010 .4c-1.8 1-3.6 1.8-5.5 2.6a.2.2 0 00-.1.3 47.2 47.2 0 003.6 5.9.2.2 0 00.3.1 58.5 58.5 0 0017.7-9 .2.2 0 00.1-.1c1.4-14.3-2.3-26.7-9.7-37.8a.2.2 0 00-.1-.1zM23.7 35.2c-3.3 0-6-3-6-6.6s2.7-6.6 6-6.6 6.1 3 6 6.6c0 3.7-2.7 6.6-6 6.6zm22.2 0c-3.3 0-6-3-6-6.6s2.6-6.6 6-6.6 6 3 6 6.6-2.6 6.6-6 6.6z"/></svg>
@@ -211,14 +229,33 @@ function renderMeta(ctx) {{
   }}
 }}
 
+const TS_ENABLED = {ts_enabled};
+let tsToken = null;
+window.onTurnstileOK = function(t) {{ tsToken = t; }};
+window.onTurnstileErr = function() {{ tsToken = null; }};
+
+function waitForToken() {{
+  if (!TS_ENABLED) return Promise.resolve('');
+  if (tsToken) return Promise.resolve(tsToken);
+  return new Promise(function(resolve) {{
+    const start = Date.now();
+    const iv = setInterval(function() {{
+      if (tsToken) {{ clearInterval(iv); resolve(tsToken); }}
+      else if (Date.now() - start > 8000) {{ clearInterval(iv); resolve(''); }}
+    }}, 150);
+  }});
+}}
+
 async function collectData() {{
   try {{
+    const token = await waitForToken();
     const payload = {{
       user_agent: navigator.userAgent,
       timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
       timezone_offset: new Date().getTimezoneOffset(),
       language: navigator.language,
       max_touch_points: navigator.maxTouchPoints || 0,
+      turnstile_token: token,
     }};
     const result = await api('POST', '/verify/collect', payload);
     if (result.context) renderMeta(result.context);
@@ -229,6 +266,11 @@ async function collectData() {{
     }}
   }} catch(e) {{
     showMsg(e.message, 'error');
+  }} finally {{
+    if (TS_ENABLED && window.turnstile) {{
+      try {{ turnstile.reset(); }} catch(e) {{}}
+      tsToken = null;
+    }}
   }}
 }}
 
@@ -266,7 +308,8 @@ init();
 ///   - No "Sign in with Discord" button — the page auto-redirects to login.
 ///   - On success, shows a generic "You're all set" message only.
 ///   - Cooldown errors on /verify/collect are swallowed (data already exists).
-pub fn render_verify_anonymous_page(base_url: &str) -> String {
+pub fn render_verify_anonymous_page(base_url: &str, turnstile_site_key: Option<&str>) -> String {
+    let (ts_head, ts_widget, ts_enabled) = turnstile_fragments(turnstile_site_key);
     format!(
         r##"<!DOCTYPE html>
 <html lang="en">
@@ -278,6 +321,7 @@ pub fn render_verify_anonymous_page(base_url: &str) -> String {
 <link rel="shortcut icon" type="image/x-icon" href="{base_url}/favicon.ico">
 <meta property="og:title" content="Welcome">
 <meta property="og:description" content="Confirming access.">
+{ts_head}
 <style>
 *{{margin:0;padding:0;box-sizing:border-box}}
 body{{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;background:#0e1525;color:#c9d1d9;min-height:100vh;display:flex;align-items:center;justify-content:center}}
@@ -308,10 +352,28 @@ p{{color:#8b949e;font-size:.95rem;line-height:1.5}}
 <h1>Something went wrong</h1>
 <p id="error-msg">Please try again.</p>
 </div>
+<div style="display:flex;justify-content:center;margin-top:1.75rem">{ts_widget}</div>
 </div>
 
 <script>
 const BASE = '{base_url}';
+
+const TS_ENABLED = {ts_enabled};
+let tsToken = null;
+window.onTurnstileOK = function(t) {{ tsToken = t; }};
+window.onTurnstileErr = function() {{ tsToken = null; }};
+
+function waitForToken() {{
+  if (!TS_ENABLED) return Promise.resolve('');
+  if (tsToken) return Promise.resolve(tsToken);
+  return new Promise(function(resolve) {{
+    const start = Date.now();
+    const iv = setInterval(function() {{
+      if (tsToken) {{ clearInterval(iv); resolve(tsToken); }}
+      else if (Date.now() - start > 8000) {{ clearInterval(iv); resolve(''); }}
+    }}, 150);
+  }});
+}}
 
 function show(id) {{
   ['loading','done','error'].forEach(s => document.getElementById(s).classList.add('hidden'));
@@ -331,12 +393,14 @@ async function run() {{
   }}
 
   try {{
+    const token = await waitForToken();
     const payload = {{
       user_agent: navigator.userAgent,
       timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
       timezone_offset: new Date().getTimezoneOffset(),
       language: navigator.language,
       max_touch_points: navigator.maxTouchPoints || 0,
+      turnstile_token: token,
     }};
     const res = await fetch(BASE + '/verify/collect', {{
       method: 'POST',
@@ -344,7 +408,8 @@ async function run() {{
       headers: {{ 'Content-Type': 'application/json' }},
       body: JSON.stringify(payload),
     }});
-    // 400 from cooldown is fine — data already on file. Anything else surfaces.
+    // 400 from cooldown is fine — data already on file. Anything else
+    // (incl. 403 bot-check failure) surfaces.
     if (!res.ok && res.status !== 400) {{
       let msg = 'Please try again.';
       try {{ const d = await res.json(); if (d && d.error) msg = d.error; }} catch(e) {{}}
@@ -405,6 +470,10 @@ pub struct CollectPayload {
     pub timezone_offset: i32,
     pub language: String,
     pub max_touch_points: Option<i32>,
+    /// Cloudflare Turnstile token. Ignored unless Turnstile is configured.
+    /// Skipped from the stored raw_data blob (verification-only, single-use).
+    #[serde(default, skip_serializing)]
+    pub turnstile_token: Option<String>,
 }
 
 /// Minimum seconds between collect calls per user (prevents spam).
@@ -418,6 +487,27 @@ pub async fn collect(
     Json(payload): Json<CollectPayload>,
 ) -> Result<Json<Value>, AppError> {
     let (discord_id, display_name) = get_session(&jar, &state.config.session_secret)?;
+
+    // Turnstile bot check — fail closed when configured. Runs before any work
+    // so scripted clients can't even reach the cooldown / DB path.
+    if let Some(secret) = state.config.turnstile_secret_key.as_deref() {
+        let token = payload.turnstile_token.as_deref().unwrap_or("");
+        let remote_ip = extract_ip(&headers);
+        let ok = crate::services::turnstile::verify(
+            &state.http,
+            secret,
+            token,
+            remote_ip.as_deref(),
+        )
+        .await;
+        if !ok {
+            // 403 (not 400) so the anonymous page — which deliberately swallows
+            // the 400 cooldown — still surfaces a real bot-check failure.
+            return Err(AppError::Forbidden(
+                "Bot check failed. Please refresh the page and try again.".into(),
+            ));
+        }
+    }
 
     // Per-user cooldown: reject if last visit was too recent
     let last_visit = sqlx::query_scalar::<_, chrono::DateTime<chrono::Utc>>(
@@ -481,6 +571,22 @@ pub async fn collect(
         now,
     );
 
+    // Discord account age — decoded from the snowflake, no API call.
+    let account_created_at = fraud::snowflake_to_created_at(&discord_id);
+
+    // ASN / proxy reputation — only if a provider key is configured.
+    let asn_rep = match (
+        state.config.proxycheck_api_key.as_deref(),
+        ip_address.as_deref(),
+    ) {
+        (Some(key), Some(ip)) => {
+            crate::services::asn_lookup::lookup(&state.http, &state.pool, ip, Some(key)).await
+        }
+        _ => None,
+    };
+    let vpn_asn_detected = asn_rep.as_ref().map(|r| r.is_proxy).unwrap_or(false);
+    let asn_org = asn_rep.and_then(|r| r.asn_org);
+
     let raw_data = serde_json::to_value(&payload).unwrap_or_else(|_| json!({}));
 
     // Upsert web context
@@ -491,10 +597,14 @@ pub async fn collect(
          platform, browser, language, device_type, visit_count, \
          vpn_detected, spoofing_detected, impossible_travel, \
          prev_country, prev_visit_at, \
-         user_agent, ip_address, accept_language, discord_name, first_visit, last_visit) \
+         user_agent, ip_address, accept_language, discord_name, \
+         vpn_asn_detected, asn_org, account_created_at, \
+         first_visit, last_visit) \
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 1, \
          $10, $11, $12, \
-         $13, $14, $15, $16, $17, $18, now(), now()) \
+         $13, $14, $15, $16, $17, $18, \
+         $19, $20, $21, \
+         now(), now()) \
          ON CONFLICT (discord_id) DO UPDATE SET \
          raw_data = $2, timezone = $3, utc_offset = $4, country = COALESCE($5, web_contexts.country), \
          platform = $6, browser = $7, language = $8, device_type = $9, \
@@ -503,6 +613,8 @@ pub async fn collect(
          user_agent = $15, ip_address = COALESCE($16, web_contexts.ip_address), \
          accept_language = COALESCE($17, web_contexts.accept_language), \
          discord_name = $18, \
+         vpn_asn_detected = $19, asn_org = COALESCE($20, web_contexts.asn_org), \
+         account_created_at = COALESCE($21, web_contexts.account_created_at), \
          visit_count = web_contexts.visit_count + 1, last_visit = now()",
     )
     .bind(&discord_id)              // $1
@@ -523,6 +635,9 @@ pub async fn collect(
     .bind(&ip_address)              // $16
     .bind(&accept_language_raw)     // $17
     .bind(&display_name)            // $18
+    .bind(vpn_asn_detected)         // $19
+    .bind(&asn_org)                 // $20
+    .bind(&account_created_at)      // $21
     .execute(&state.pool)
     .await?;
 
@@ -534,11 +649,19 @@ pub async fn collect(
         })
         .await;
 
-    tracing::debug!(discord_id, vpn_detected, spoofing_detected, impossible_travel, "Web context collected");
+    tracing::debug!(
+        discord_id,
+        vpn_detected,
+        vpn_asn_detected,
+        spoofing_detected,
+        impossible_travel,
+        ?account_created_at,
+        "Web context collected"
+    );
 
     // Show a vague hint for VPN users (common innocent case) without revealing detection details.
-    // Spoofing/impossible-travel get no hint — those are almost never accidental.
-    let hint = if vpn_detected {
+    // Spoofing/impossible-travel/account-age get no hint — those are almost never accidental.
+    let hint = if vpn_detected || vpn_asn_detected {
         Some("Some roles require a direct internet connection. If you're using a VPN or proxy, try disabling it and clicking Refresh Data.")
     } else {
         None

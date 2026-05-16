@@ -26,11 +26,15 @@ A [RoleLogic](https://rolelogic.faizo.net) plugin that assigns Discord roles bas
 | Browser     | User-Agent parsing                      | Chrome, Firefox, Safari, Edge |
 | Device Type | User-Agent + touch detection            | Desktop, Mobile, Tablet       |
 
-### Anti-Fraud (3 toggles, AND'd with identity condition)
+### Anti-Fraud (AND'd with identity condition)
 
-- **Block VPN / Proxy** — Detects Tor exit nodes and IP-timezone country mismatch (the classic VPN fingerprint: IP says Japan but browser timezone says America/New_York)
+- **Block VPN / Proxy** — Detects Tor exit nodes, IP-timezone country mismatch (the classic VPN fingerprint: IP says Japan but browser timezone says America/New_York), **and** — when an ASN reputation key is configured — any IP flagged as a known VPN / datacenter / proxy. The ASN check is what catches *same-country* commercial VPNs (NordVPN, ExpressVPN, etc.) that the timezone heuristic can't see.
 - **Block Spoofed Identity** — Cross-validates UTC offset vs timezone (DST-aware), offset vs country, platform/browser consistency, platform/device consistency
 - **Block Impossible Travel** — Flags users whose IP country changed faster than physically possible between visits
+- **Minimum account age** — Rejects Discord accounts younger than N days. Creation time is decoded from the Discord snowflake (no API call). Effective against alt farms.
+- **Turnstile bot check** *(host-wide, optional)* — Cloudflare Turnstile gate on the verify page. Blocks headless browsers and scripted clients before any data is stored. Fails closed when enabled.
+
+ASN reputation and Turnstile are **opt-in via environment variables** — the plugin runs fine without them; those checks simply stay off. IP reputation results are cached per /24 (IPv4) or /48 (IPv6) for 7 days to keep external API usage low.
 
 ## Tech Stack
 
@@ -56,6 +60,9 @@ docker compose up -d
 | `SESSION_SECRET` | Yes      | HMAC key for `rl_session` cookie (must match Auth Gateway)              |
 | `BASE_URL`       | Yes      | Full URL with prefix, e.g. `https://your-domain.com/member-origin-role` |
 | `LISTEN_ADDR`    | No       | Bind address (default `0.0.0.0:8080`)                                   |
+| `PROXYCHECK_API_KEY`  | No  | proxycheck.io key — enables ASN/proxy reputation in "Block VPN / Proxy" |
+| `TURNSTILE_SITE_KEY`  | No  | Cloudflare Turnstile site key (widget). Both keys required to enable    |
+| `TURNSTILE_SECRET_KEY`| No  | Cloudflare Turnstile secret key (server-side siteverify)                |
 
 ### Endpoints
 

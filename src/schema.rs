@@ -19,6 +19,7 @@ pub fn build_config_schema(
     values.insert("block_vpn".into(), json!(conditions.block_vpn));
     values.insert("block_spoofing".into(), json!(conditions.block_spoofing));
     values.insert("block_impossible_travel".into(), json!(conditions.block_impossible_travel));
+    values.insert("min_account_age_days".into(), json!(conditions.min_account_age_days));
     values.insert("anonymous_mode".into(), json!(conditions.anonymous_mode));
     values.insert("view_permission".into(), json!(view_permission));
 
@@ -216,7 +217,7 @@ pub fn build_config_schema(
                         "type": "toggle",
                         "key": "block_vpn",
                         "label": "Block VPN / Proxy",
-                        "description": "Reject users whose IP country doesn't match their browser timezone (the classic VPN fingerprint), and Tor exit nodes. Catches NordVPN, ExpressVPN, etc. when connecting to a different country."
+                        "description": "Reject users whose IP country doesn't match their browser timezone (the classic VPN fingerprint), Tor exit nodes, AND any IP flagged as a known VPN / datacenter / proxy by the ASN reputation lookup. The ASN check catches same-country commercial VPNs (NordVPN, ExpressVPN, etc.) that the timezone heuristic misses."
                     },
                     {
                         "type": "toggle",
@@ -229,6 +230,14 @@ pub fn build_config_schema(
                         "key": "block_impossible_travel",
                         "label": "Block Impossible Travel",
                         "description": "Reject users whose IP country changed faster than physically possible between visits (e.g. US to Japan in 1 hour). Requires at least 2 visits to detect."
+                    },
+                    {
+                        "type": "number",
+                        "key": "min_account_age_days",
+                        "label": "Minimum Discord account age (days)",
+                        "description": "Reject Discord accounts younger than this many days. Account creation time is decoded from the Discord user ID (no API call). Useful against alt farms and freshly-minted accounts. 0 = no minimum.",
+                        "default_value": 0,
+                        "validation": { "min": 0, "max": 3650 }
                     }
                 ]
             },
@@ -360,6 +369,11 @@ pub fn parse_config(config: &HashMap<String, Value>) -> Result<WebConditions, Ap
         .get("block_impossible_travel")
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
+    let min_account_age_days = config
+        .get("min_account_age_days")
+        .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse::<i64>().ok())))
+        .unwrap_or(0)
+        .clamp(0, 3650) as i32;
     let anonymous_mode = config
         .get("anonymous_mode")
         .and_then(|v| v.as_bool())
@@ -373,6 +387,7 @@ pub fn parse_config(config: &HashMap<String, Value>) -> Result<WebConditions, Ap
         block_vpn,
         block_spoofing,
         block_impossible_travel,
+        min_account_age_days,
         anonymous_mode,
     })
 }

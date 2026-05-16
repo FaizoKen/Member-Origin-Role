@@ -13,6 +13,20 @@ pub struct AppConfig {
     /// Shared secret for plugin → gateway /auth/internal/* calls
     /// (sent in the `X-Internal-Key` header). Must match INTERNAL_API_KEY on the gateway.
     pub internal_api_key: String,
+
+    /// proxycheck.io API key for IP/ASN reputation lookups. When unset, the
+    /// ASN VPN check is disabled (the timezone-mismatch heuristic still runs).
+    pub proxycheck_api_key: Option<String>,
+    /// Cloudflare Turnstile site key. When set, the verify page renders the
+    /// widget and `collect` requires a passing token. Unset = check disabled.
+    pub turnstile_site_key: Option<String>,
+    /// Cloudflare Turnstile secret key (server-side siteverify).
+    pub turnstile_secret_key: Option<String>,
+}
+
+/// Read an env var, treating empty / whitespace-only as unset.
+fn opt_env(key: &str) -> Option<String> {
+    env::var(key).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
 }
 
 /// Extract the origin (scheme://host[:port]) from BASE_URL, dropping any path prefix.
@@ -42,6 +56,9 @@ impl AppConfig {
             auth_gateway_url,
             internal_api_key: env::var("INTERNAL_API_KEY")
                 .expect("INTERNAL_API_KEY must be set (must match the Auth Gateway's value)"),
+            proxycheck_api_key: opt_env("PROXYCHECK_API_KEY"),
+            turnstile_site_key: opt_env("TURNSTILE_SITE_KEY"),
+            turnstile_secret_key: opt_env("TURNSTILE_SECRET_KEY"),
         }
     }
 }

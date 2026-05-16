@@ -59,10 +59,14 @@ async fn main() {
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .expect("Failed to build HTTP client");
-    let verify_html =
-        bytes::Bytes::from(routes::verification::render_verify_page(&app_config.base_url));
-    let verify_anonymous_html =
-        bytes::Bytes::from(routes::verification::render_verify_anonymous_page(&app_config.base_url));
+    let verify_html = bytes::Bytes::from(routes::verification::render_verify_page(
+        &app_config.base_url,
+        app_config.turnstile_site_key.as_deref(),
+    ));
+    let verify_anonymous_html = bytes::Bytes::from(routes::verification::render_verify_anonymous_page(
+        &app_config.base_url,
+        app_config.turnstile_site_key.as_deref(),
+    ));
     let members_html =
         bytes::Bytes::from(routes::members::render_members_page(&app_config.base_url));
 
