@@ -404,7 +404,7 @@ pub async fn sync_for_role_link(
     }
 
     match rl_client
-        .replace_users(guild_id, role_id, &qualifying_ids, &api_token)
+        .upload_users(guild_id, role_id, &qualifying_ids, &api_token)
         .await
     {
         Ok(_) => {}
