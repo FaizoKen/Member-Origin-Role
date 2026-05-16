@@ -40,8 +40,20 @@ pub async fn sync_for_player(
     .await?;
 
     let Some(web_ctx) = web_ctx else {
+        tracing::debug!(
+            discord_id,
+            "sync_for_player: no web_contexts row yet \u{2014} skipping sync"
+        );
         return Ok(());
     };
+
+    tracing::debug!(
+        discord_id,
+        country = ?web_ctx.country,
+        timezone = ?web_ctx.timezone,
+        platform = ?web_ctx.platform,
+        "sync_for_player: loaded web_context"
+    );
 
     let guild_ids = auth_gateway::fetch_user_guild_ids(
         &state.http,
@@ -52,8 +64,21 @@ pub async fn sync_for_player(
     .await?;
 
     if guild_ids.is_empty() {
+        tracing::warn!(
+            discord_id,
+            "sync_for_player: Auth Gateway reports the user is in 0 guilds \u{2014} \
+             nothing to sync. The gateway's user_guilds table is the source of truth; \
+             if the user IS actually in your Discord server, the gateway hasn't refreshed \
+             their guild list yet. Have them log out and back in via /auth/login."
+        );
         return Ok(());
     }
+
+    tracing::debug!(
+        discord_id,
+        guild_count = guild_ids.len(),
+        "sync_for_player: Auth Gateway returned guilds"
+    );
 
     let role_links = sqlx::query_as::<_, (String, String, String, sqlx::types::Json<WebConditions>)>(
         "SELECT rl.guild_id, rl.role_id, rl.api_token, rl.conditions \
@@ -63,6 +88,23 @@ pub async fn sync_for_player(
     .bind(&guild_ids[..])
     .fetch_all(pool)
     .await?;
+
+    if role_links.is_empty() {
+        tracing::warn!(
+            discord_id,
+            guild_ids = ?guild_ids,
+            "sync_for_player: user IS in guilds, but none of those guilds have a \
+             role_link configured for this plugin. Check that the role_link.guild_id \
+             matches one of the guilds the user is in."
+        );
+        return Ok(());
+    }
+
+    tracing::debug!(
+        discord_id,
+        role_link_count = role_links.len(),
+        "sync_for_player: matched role_links"
+    );
 
     let existing: HashSet<(String, String)> = sqlx::query_as::<_, (String, String)>(
         "SELECT guild_id, role_id FROM role_assignments WHERE discord_id = $1",
@@ -82,6 +124,17 @@ pub async fn sync_for_player(
     for (guild_id, role_id, api_token, conditions) in &role_links {
         let qualifies = evaluate(conditions, &web_ctx);
         let currently_assigned = existing.contains(&(guild_id.clone(), role_id.clone()));
+        tracing::debug!(
+            discord_id,
+            guild_id,
+            role_id,
+            field = %conditions.field,
+            operator = %conditions.operator,
+            value = %conditions.value,
+            qualifies,
+            currently_assigned,
+            "sync_for_player: evaluated role_link"
+        );
         match (qualifies, currently_assigned) {
             (true, false) => actions.push(Action::Add {
                 guild_id: guild_id.clone(),
@@ -98,8 +151,18 @@ pub async fn sync_for_player(
     }
 
     if actions.is_empty() {
+        tracing::debug!(
+            discord_id,
+            "sync_for_player: no actions needed (user state already matches conditions)"
+        );
         return Ok(());
     }
+
+    tracing::debug!(
+        discord_id,
+        action_count = actions.len(),
+        "sync_for_player: applying actions"
+    );
 
     let discord_id_owned = discord_id.to_string();
     stream::iter(actions)
@@ -115,11 +178,17 @@ pub async fn sync_for_player(
                                 tracing::warn!(guild_id, role_id, discord_id, limit, "User limit reached");
                                 return;
                             }
+                            Err(AppError::RoleLinkNotFound) => {
+                                delete_orphan_role_link(&guild_id, &role_id, &pool).await;
+                                return;
+                            }
                             Err(e) => {
                                 tracing::error!(guild_id, role_id, discord_id, "Failed to add user: {e}");
                                 return;
                             }
-                            Ok(_) => {}
+                            Ok(_) => {
+                                tracing::debug!(guild_id, role_id, discord_id, "RoleLogic add_user succeeded");
+                            }
                         }
                         if let Err(e) = sqlx::query(
                             "INSERT INTO role_assignments (guild_id, role_id, discord_id) \
@@ -131,9 +200,16 @@ pub async fn sync_for_player(
                         }
                     }
                     Action::Remove { guild_id, role_id, api_token } => {
-                        if let Err(e) = rl_client.remove_user(&guild_id, &role_id, &discord_id, &api_token).await {
-                            tracing::error!(guild_id, role_id, discord_id, "Failed to remove user: {e}");
-                            return;
+                        match rl_client.remove_user(&guild_id, &role_id, &discord_id, &api_token).await {
+                            Ok(_) => {}
+                            Err(AppError::RoleLinkNotFound) => {
+                                delete_orphan_role_link(&guild_id, &role_id, &pool).await;
+                                return;
+                            }
+                            Err(e) => {
+                                tracing::error!(guild_id, role_id, discord_id, "Failed to remove user: {e}");
+                                return;
+                            }
                         }
                         if let Err(e) = sqlx::query(
                             "DELETE FROM role_assignments WHERE guild_id = $1 AND role_id = $2 AND discord_id = $3",
@@ -241,7 +317,14 @@ pub async fn sync_for_role_link(
         || conditions.block_spoofing
         || conditions.block_impossible_travel;
     if !has_identity && !has_fraud {
-        rl_client.replace_users(guild_id, role_id, &[], &api_token).await?;
+        match rl_client.replace_users(guild_id, role_id, &[], &api_token).await {
+            Ok(_) => {}
+            Err(AppError::RoleLinkNotFound) => {
+                delete_orphan_role_link(guild_id, role_id, pool).await;
+                return Ok(());
+            }
+            Err(e) => return Err(e),
+        }
         sqlx::query("DELETE FROM role_assignments WHERE guild_id = $1 AND role_id = $2")
             .bind(guild_id).bind(role_id)
             .execute(pool).await?;
@@ -257,7 +340,14 @@ pub async fn sync_for_role_link(
     .await?;
 
     if member_ids.is_empty() {
-        rl_client.replace_users(guild_id, role_id, &[], &api_token).await?;
+        match rl_client.replace_users(guild_id, role_id, &[], &api_token).await {
+            Ok(_) => {}
+            Err(AppError::RoleLinkNotFound) => {
+                delete_orphan_role_link(guild_id, role_id, pool).await;
+                return Ok(());
+            }
+            Err(e) => return Err(e),
+        }
         let mut tx = pool.begin().await?;
         sqlx::query("DELETE FROM role_assignments WHERE guild_id = $1 AND role_id = $2")
             .bind(guild_id).bind(role_id)
@@ -266,10 +356,20 @@ pub async fn sync_for_role_link(
         return Ok(());
     }
 
-    let (_user_count, user_limit) = rl_client
+    let (_user_count, user_limit) = match rl_client
         .get_user_info(guild_id, role_id, &api_token)
         .await
-        .unwrap_or((0, 100));
+    {
+        Ok(info) => info,
+        Err(AppError::RoleLinkNotFound) => {
+            delete_orphan_role_link(guild_id, role_id, pool).await;
+            return Ok(());
+        }
+        // Other RoleLogic errors here are non-fatal — fall back to defaults
+        // so the worker can still attempt the main replace_users call below
+        // (which has its own RoleLinkNotFound handling).
+        Err(_) => (0, 100),
+    };
 
     let (where_clause, binds) = build_condition_where(&conditions);
 
@@ -303,9 +403,17 @@ pub async fn sync_for_role_link(
         }
     }
 
-    rl_client
+    match rl_client
         .replace_users(guild_id, role_id, &qualifying_ids, &api_token)
-        .await?;
+        .await
+    {
+        Ok(_) => {}
+        Err(AppError::RoleLinkNotFound) => {
+            delete_orphan_role_link(guild_id, role_id, pool).await;
+            return Ok(());
+        }
+        Err(e) => return Err(e),
+    }
 
     let mut tx = pool.begin().await?;
     sqlx::query("DELETE FROM role_assignments WHERE guild_id = $1 AND role_id = $2")
@@ -379,8 +487,14 @@ pub async fn remove_all_assignments(
     .await?;
 
     for (guild_id, role_id, api_token) in &assignments {
-        if let Err(e) = rl_client.remove_user(guild_id, role_id, discord_id, api_token).await {
-            tracing::error!(guild_id, role_id, discord_id, "Failed to remove user during cleanup: {e}");
+        match rl_client.remove_user(guild_id, role_id, discord_id, api_token).await {
+            Ok(_) => {}
+            Err(AppError::RoleLinkNotFound) => {
+                delete_orphan_role_link(guild_id, role_id, pool).await;
+            }
+            Err(e) => {
+                tracing::error!(guild_id, role_id, discord_id, "Failed to remove user during cleanup: {e}");
+            }
         }
     }
 
@@ -388,4 +502,24 @@ pub async fn remove_all_assignments(
         .bind(discord_id).execute(pool).await?;
 
     Ok(())
+}
+
+/// Delete a role_link the RoleLogic API reports as gone (403 "Invalid or
+/// revoked token"). `role_assignments` cascades on the FK. Best-effort:
+/// logs DB failures, never propagates them — sync workers must not stop
+/// syncing other links over a cleanup hiccup.
+async fn delete_orphan_role_link(guild_id: &str, role_id: &str, pool: &sqlx::PgPool) {
+    tracing::warn!(
+        guild_id,
+        role_id,
+        "Role link not found on RoleLogic; removing orphaned local row"
+    );
+    if let Err(e) = sqlx::query("DELETE FROM role_links WHERE guild_id = $1 AND role_id = $2")
+        .bind(guild_id)
+        .bind(role_id)
+        .execute(pool)
+        .await
+    {
+        tracing::error!(guild_id, role_id, "Failed to delete orphan role_link: {e}");
+    }
 }

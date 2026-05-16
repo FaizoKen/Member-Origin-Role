@@ -10,6 +10,9 @@ pub enum AppError {
     #[error("RoleLogic API error: {0}")]
     RoleLogic(String),
 
+    #[error("Role link not found on RoleLogic")]
+    RoleLinkNotFound,
+
     #[error("Role link user limit reached ({limit})")]
     UserLimitReached { limit: usize },
 
@@ -18,6 +21,12 @@ pub enum AppError {
 
     #[error("Unauthorized")]
     Unauthorized,
+
+    #[error("Unauthorized: {0}")]
+    UnauthorizedWith(String),
+
+    #[error("Forbidden: {0}")]
+    Forbidden(String),
 
     #[error("Not found: {0}")]
     NotFound(String),
@@ -37,6 +46,7 @@ impl IntoResponse for AppError {
                 tracing::error!("RoleLogic API error: {e}");
                 (StatusCode::BAD_GATEWAY, "Failed to sync roles")
             }
+            AppError::RoleLinkNotFound => (StatusCode::NOT_FOUND, "Role link not found"),
             AppError::UserLimitReached { limit } => {
                 tracing::warn!("Role link user limit reached: {limit}");
                 (StatusCode::FORBIDDEN, "Role link user limit reached")
@@ -45,6 +55,8 @@ impl IntoResponse for AppError {
             AppError::Unauthorized => {
                 (StatusCode::UNAUTHORIZED, "Invalid or missing authorization")
             }
+            AppError::UnauthorizedWith(msg) => (StatusCode::UNAUTHORIZED, msg.as_str()),
+            AppError::Forbidden(msg) => (StatusCode::FORBIDDEN, msg.as_str()),
             AppError::NotFound(msg) => (StatusCode::NOT_FOUND, msg.as_str()),
             AppError::Internal(e) => {
                 tracing::error!("Internal error: {e}");

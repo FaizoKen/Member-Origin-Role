@@ -45,6 +45,16 @@ pub async fn register(
     .execute(&state.pool)
     .await?;
 
+    // Ensure a guild_settings row exists so reads always find one.
+    // Defaults to 'managers' since member-origin data is sensitive.
+    sqlx::query(
+        "INSERT INTO guild_settings (guild_id) VALUES ($1) \
+         ON CONFLICT (guild_id) DO NOTHING",
+    )
+    .bind(&body.guild_id)
+    .execute(&state.pool)
+    .await?;
+
     tracing::info!(
         guild_id = body.guild_id,
         role_id = body.role_id,
@@ -68,8 +78,19 @@ pub async fn get_config(
     .await?
     .ok_or(AppError::Unauthorized)?;
 
+    // view_permission is per-guild, not per-role-link. Default 'managers'
+    // when a guild_settings row doesn't yet exist.
+    let view_permission: String = sqlx::query_scalar(
+        "SELECT view_permission FROM guild_settings WHERE guild_id = $1",
+    )
+    .bind(&link.0)
+    .fetch_optional(&state.pool)
+    .await?
+    .unwrap_or_else(|| "managers".to_string());
+
     let verify_url = format!("{}/verify", state.config.base_url);
-    let schema = schema::build_config_schema(&link.1, &verify_url);
+    let members_url = format!("{}/members/{}", state.config.base_url, link.0);
+    let schema = schema::build_config_schema(&link.1, &verify_url, &members_url, &view_permission);
 
     Ok(Json(schema))
 }
@@ -104,19 +125,52 @@ pub async fn post_config(
 
     let conditions = schema::parse_config(&body.config)?;
 
+    // Parse view_permission (per-guild). Default 'managers' since member
+    // data is sensitive. Validate enum.
+    let view_permission = body
+        .config
+        .get("view_permission")
+        .and_then(|v| v.as_str())
+        .unwrap_or("managers")
+        .to_string();
+    if view_permission != "members" && view_permission != "managers" {
+        return Err(AppError::BadRequest(
+            "view_permission must be 'members' or 'managers'".into(),
+        ));
+    }
+
+    // Write conditions (per-role) and view_permission (per-guild) together so a
+    // partial failure can't leave them out of sync.
+    let mut tx = state.pool.begin().await?;
+
     sqlx::query(
-        "UPDATE role_links SET conditions = $1, updated_at = now() WHERE guild_id = $2 AND role_id = $3",
+        "UPDATE role_links SET conditions = $1, updated_at = now() \
+         WHERE guild_id = $2 AND role_id = $3",
     )
     .bind(sqlx::types::Json(&conditions))
     .bind(&body.guild_id)
     .bind(&body.role_id)
-    .execute(&state.pool)
+    .execute(&mut *tx)
     .await?;
+
+    sqlx::query(
+        "INSERT INTO guild_settings (guild_id, view_permission, updated_at) \
+         VALUES ($1, $2, now()) \
+         ON CONFLICT (guild_id) \
+         DO UPDATE SET view_permission = EXCLUDED.view_permission, updated_at = now()",
+    )
+    .bind(&body.guild_id)
+    .bind(&view_permission)
+    .execute(&mut *tx)
+    .await?;
+
+    tx.commit().await?;
 
     tracing::info!(
         guild_id = body.guild_id,
         role_id = body.role_id,
         field = conditions.field,
+        view_permission,
         "Config updated"
     );
 

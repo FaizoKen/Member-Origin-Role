@@ -1,5 +1,12 @@
 use crate::error::AppError;
 
+/// Body substring RoleLogic returns when our token isn't found server-side.
+/// Because `RoleLinkToken` rows cascade on `RoleLink` delete, getting this
+/// reliably signals the role link has been deleted upstream — not a token
+/// rotation (the API has no rotate endpoint) and not "disabled" (that
+/// returns a different 403 message). Source: `role-link-token.guard.ts`.
+const RL_LINK_GONE_ERROR_MSG: &str = "Invalid or revoked token";
+
 #[derive(Clone)]
 pub struct RoleLogicClient {
     http: reqwest::Client,
@@ -42,6 +49,9 @@ impl RoleLogicClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
+            if status == reqwest::StatusCode::FORBIDDEN && body.contains(RL_LINK_GONE_ERROR_MSG) {
+                return Err(AppError::RoleLinkNotFound);
+            }
             return Err(AppError::RoleLogic(format!(
                 "Get user info failed: {status} - {body}"
             )));
@@ -81,6 +91,10 @@ impl RoleLogicClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
+
+            if status == reqwest::StatusCode::FORBIDDEN && body.contains(RL_LINK_GONE_ERROR_MSG) {
+                return Err(AppError::RoleLinkNotFound);
+            }
 
             if (status == reqwest::StatusCode::BAD_REQUEST
                 || status == reqwest::StatusCode::FORBIDDEN)
@@ -127,6 +141,9 @@ impl RoleLogicClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
+            if status == reqwest::StatusCode::FORBIDDEN && body.contains(RL_LINK_GONE_ERROR_MSG) {
+                return Err(AppError::RoleLinkNotFound);
+            }
             return Err(AppError::RoleLogic(format!(
                 "Remove user failed: {status} - {body}"
             )));
@@ -164,6 +181,9 @@ impl RoleLogicClient {
         if !resp.status().is_success() {
             let status = resp.status();
             let body = resp.text().await.unwrap_or_default();
+            if status == reqwest::StatusCode::FORBIDDEN && body.contains(RL_LINK_GONE_ERROR_MSG) {
+                return Err(AppError::RoleLinkNotFound);
+            }
             return Err(AppError::RoleLogic(format!(
                 "Replace users failed: {status} - {body}"
             )));

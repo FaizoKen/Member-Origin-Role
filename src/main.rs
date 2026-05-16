@@ -30,6 +30,7 @@ pub struct AppState {
     pub http: reqwest::Client,
     pub verify_html: bytes::Bytes,
     pub verify_anonymous_html: bytes::Bytes,
+    pub members_html: bytes::Bytes,
 }
 
 #[tokio::main]
@@ -62,6 +63,8 @@ async fn main() {
         bytes::Bytes::from(routes::verification::render_verify_page(&app_config.base_url));
     let verify_anonymous_html =
         bytes::Bytes::from(routes::verification::render_verify_anonymous_page(&app_config.base_url));
+    let members_html =
+        bytes::Bytes::from(routes::members::render_members_page(&app_config.base_url));
 
     let state = Arc::new(AppState {
         pool,
@@ -72,6 +75,7 @@ async fn main() {
         http,
         verify_html,
         verify_anonymous_html,
+        members_html,
     });
 
     // Spawn background workers
@@ -96,6 +100,9 @@ async fn main() {
             .route("/verify/status", get(routes::verification::status))
             .route("/verify/collect", post(routes::verification::collect))
             .route("/verify/logout", post(routes::verification::logout))
+            // Member list (admin-facing)
+            .route("/members/{guild_id}", get(routes::members::members_page))
+            .route("/members/{guild_id}/data", get(routes::members::members_data))
             // Health & static
             .route("/health", get(routes::health::health))
             .route("/favicon.ico", get(routes::health::favicon))

@@ -417,7 +417,7 @@ pub async fn collect(
     jar: CookieJar,
     Json(payload): Json<CollectPayload>,
 ) -> Result<Json<Value>, AppError> {
-    let (discord_id, _) = get_session(&jar, &state.config.session_secret)?;
+    let (discord_id, display_name) = get_session(&jar, &state.config.session_secret)?;
 
     // Per-user cooldown: reject if last visit was too recent
     let last_visit = sqlx::query_scalar::<_, chrono::DateTime<chrono::Utc>>(
@@ -491,10 +491,10 @@ pub async fn collect(
          platform, browser, language, device_type, visit_count, \
          vpn_detected, spoofing_detected, impossible_travel, \
          prev_country, prev_visit_at, \
-         user_agent, ip_address, accept_language, first_visit, last_visit) \
+         user_agent, ip_address, accept_language, discord_name, first_visit, last_visit) \
          VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 1, \
          $10, $11, $12, \
-         $13, $14, $15, $16, $17, now(), now()) \
+         $13, $14, $15, $16, $17, $18, now(), now()) \
          ON CONFLICT (discord_id) DO UPDATE SET \
          raw_data = $2, timezone = $3, utc_offset = $4, country = COALESCE($5, web_contexts.country), \
          platform = $6, browser = $7, language = $8, device_type = $9, \
@@ -502,6 +502,7 @@ pub async fn collect(
          prev_country = web_contexts.country, prev_visit_at = web_contexts.last_visit, \
          user_agent = $15, ip_address = COALESCE($16, web_contexts.ip_address), \
          accept_language = COALESCE($17, web_contexts.accept_language), \
+         discord_name = $18, \
          visit_count = web_contexts.visit_count + 1, last_visit = now()",
     )
     .bind(&discord_id)              // $1
@@ -521,6 +522,7 @@ pub async fn collect(
     .bind(&payload.user_agent)      // $15
     .bind(&ip_address)              // $16
     .bind(&accept_language_raw)     // $17
+    .bind(&display_name)            // $18
     .execute(&state.pool)
     .await?;
 

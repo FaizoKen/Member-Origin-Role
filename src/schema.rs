@@ -4,7 +4,12 @@ use std::collections::HashMap;
 use crate::error::AppError;
 use crate::models::condition::{ConditionField, ConditionOperator, WebConditions};
 
-pub fn build_config_schema(conditions: &WebConditions, verify_url: &str) -> Value {
+pub fn build_config_schema(
+    conditions: &WebConditions,
+    verify_url: &str,
+    members_url: &str,
+    view_permission: &str,
+) -> Value {
     // Populate current values for the form
     let mut values: HashMap<String, Value> = HashMap::new();
     values.insert("field".into(), json!(conditions.field));
@@ -15,6 +20,7 @@ pub fn build_config_schema(conditions: &WebConditions, verify_url: &str) -> Valu
     values.insert("block_spoofing".into(), json!(conditions.block_spoofing));
     values.insert("block_impossible_travel".into(), json!(conditions.block_impossible_travel));
     values.insert("anonymous_mode".into(), json!(conditions.anonymous_mode));
+    values.insert("view_permission".into(), json!(view_permission));
 
     // Populate value for the specific field type
     if !conditions.field.is_empty() {
@@ -42,20 +48,13 @@ pub fn build_config_schema(conditions: &WebConditions, verify_url: &str) -> Valu
                         "key": "info",
                         "label": "How it works",
                         "value": format!(
-                            "This plugin assigns a Discord role based on visitor identity \
-                             detected when members visit your verification page.\n\
-                             \n\
-                             Step 1 \u{2192} Members visit and sign in with Discord at:\n\
+                            "Share this link with members:\n\
                              {verify_url}\n\
                              \n\
-                             Step 2 \u{2192} Their identity is automatically detected from both \
-                             browser APIs and HTTP headers (timezone, country, platform, \
-                             language, device type, etc.).\n\
+                             They sign in \u{2192} their origin is detected \u{2192} matching members get the role.\n\
                              \n\
-                             Step 3 \u{2192} Configure a condition and anti-fraud settings below.\n\
-                             \n\
-                             Step 4 \u{2192} Any member whose identity matches gets this role \
-                             automatically. Data updates each time they revisit."
+                             View collected data:\n\
+                             {members_url}"
                         )
                     }
                 ]
@@ -230,6 +229,23 @@ pub fn build_config_schema(conditions: &WebConditions, verify_url: &str) -> Valu
                         "key": "block_impossible_travel",
                         "label": "Block Impossible Travel",
                         "description": "Reject users whose IP country changed faster than physically possible between visits (e.g. US to Japan in 1 hour). Requires at least 2 visits to detect."
+                    }
+                ]
+            },
+            {
+                "title": "Member List Access",
+                "description": "Control who can view the collected member data for this server. This setting is shared across the entire server \u{2014} changing it from any role link's config updates it for every role link in this server.",
+                "fields": [
+                    {
+                        "type": "radio",
+                        "key": "view_permission",
+                        "label": "Who can view the member list",
+                        "description": "Applies server-wide. Default: Server managers only (recommended, since member origin data is sensitive).",
+                        "default_value": "managers",
+                        "options": [
+                            {"label": "Server managers only (requires Manage Server permission)", "value": "managers"},
+                            {"label": "Server members (anyone in this server)", "value": "members"}
+                        ]
                     }
                 ]
             },
