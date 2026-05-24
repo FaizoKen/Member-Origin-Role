@@ -157,6 +157,14 @@ h1{{font-size:1.5rem;color:#e6edf3;margin-bottom:.5rem}}
 .msg-success{{background:#1f3d1f;border:1px solid #3fb950;color:#3fb950}}
 .spinner{{width:20px;height:20px;border:2px solid #30363d;border-top-color:#58a6ff;border-radius:50%;animation:spin .6s linear infinite;display:inline-block;vertical-align:middle;margin-right:.5rem}}
 @keyframes spin{{to{{transform:rotate(360deg)}}}}
+.guild-ctx{{display:none;align-items:center;gap:10px;background:#052e16;border:1px solid #14532d;color:#86efac;padding:8px 14px;border-radius:8px;margin:0 0 12px;font-size:13px;line-height:1.5}}
+.guild-ctx.show{{display:flex}}
+.guild-ctx.warn{{background:#1c1208;border-color:#422006;color:#fbbf24}}
+.guild-ctx .gctx-icon{{flex-shrink:0}}
+.guild-ctx .gctx-name{{color:#fff;font-weight:600}}
+.manage-link{{font-size:13px;color:#8b949e;margin-top:.85rem;line-height:1.5}}
+.manage-link a{{color:#74b9ff;text-decoration:none}}
+.manage-link a:hover{{text-decoration:underline}}
 </style>
 </head>
 <body>
@@ -164,6 +172,13 @@ h1{{font-size:1.5rem;color:#e6edf3;margin-bottom:.5rem}}
 <div class="card">
 <h1>Member Origin Role</h1>
 <p class="subtitle">Sign in with Discord to verify your identity for automatic role assignment.</p>
+<!-- Server context banner: only shown when ?guild=<id> is present in the URL.
+     Lets a server admin share a per-guild link that both signs the user in
+     AND auto-enables the role for that specific server in one shot. -->
+<div id="guild-ctx" class="guild-ctx">
+<svg class="gctx-icon" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>
+<span id="guild-ctx-text"></span>
+</div>
 <div id="msg" class="hidden"></div>
 <div id="loading"><span class="spinner"></span> Loading...</div>
 <div style="display:flex;justify-content:center;margin:.5rem 0">{ts_widget}</div>
@@ -179,6 +194,10 @@ Sign in with Discord
 <span class="status-badge badge-ok">Verified</span>
 </div>
 <div class="meta-grid" id="meta-grid"></div>
+<p class="manage-link">
+Receiving Member Origin roles in servers you didn't intend?
+<a href="/auth/my_servers?from=/member-origin-role/verify">Choose which servers receive roles &rarr;</a>
+</p>
 <button class="btn btn-refresh" onclick="collectData()">Refresh Data</button>
 <button class="btn btn-logout" onclick="doLogout()">Log Out</button>
 </div>
@@ -187,6 +206,31 @@ Sign in with Discord
 
 <script>
 const BASE = '{base_url}';
+const PLUGIN_SLUG = 'member-origin-role';
+
+// Optional ?guild=<id> tells us the user came from a per-guild verify
+// link an admin shared in their Discord. We use it to (a) show a
+// contextual banner so the user knows which server this is for and
+// (b) automatically clear any existing opt-out (both per-plugin and
+// the guild-wide master) once they're authenticated — so a returning
+// user who'd previously disabled this server doesn't have to find
+// /auth/my_servers to re-enable it.
+const guildId = (() => {{
+  try {{
+    const v = new URLSearchParams(window.location.search).get('guild');
+    return v && /^[0-9]{{5,25}}$/.test(v) ? v : '';
+  }} catch (e) {{ return ''; }}
+}})();
+
+// Preserve the guild context across the Discord OAuth round-trip so
+// an unauth visitor who logs in lands back on this same per-guild URL.
+(function patchLoginHref() {{
+  if (!guildId) return;
+  const link = document.querySelector('#login a.btn-discord');
+  if (!link) return;
+  const returnTo = '/member-origin-role/verify?guild=' + encodeURIComponent(guildId);
+  link.href = '/auth/login?return_to=' + encodeURIComponent(returnTo);
+}})();
 
 function show(id) {{
   ['loading','login','collected'].forEach(s => document.getElementById(s).classList.add('hidden'));
@@ -201,6 +245,13 @@ function showMsg(text, type) {{
   if (type === 'success') setTimeout(() => el.classList.add('hidden'), 5000);
 }}
 
+function showGuildCtx(text, isWarning) {{
+  const el = document.getElementById('guild-ctx');
+  document.getElementById('guild-ctx-text').innerHTML = text;
+  el.classList.toggle('warn', !!isWarning);
+  el.classList.add('show');
+}}
+
 async function api(method, path, body) {{
   const opts = {{ method, credentials: 'include', headers: {{'Content-Type': 'application/json'}} }};
   if (body) opts.body = JSON.stringify(body);
@@ -208,6 +259,70 @@ async function api(method, path, body) {{
   const data = await res.json();
   if (!res.ok) throw new Error(data.error || 'Request failed');
   return data;
+}}
+
+// Gateway-absolute API helper for /auth/* (cookie-authed via the shared
+// rl_session). Same shape as `api()` but doesn't prefix with base_url.
+async function gatewayApi(method, path, body) {{
+  const opts = {{ method, credentials: 'include', headers: {{}} }};
+  if (body) {{
+    opts.headers['Content-Type'] = 'application/json';
+    opts.body = JSON.stringify(body);
+  }}
+  const res = await fetch(path, opts);
+  const data = await res.json().catch(() => ({{}}));
+  if (!res.ok) throw new Error(data.error || 'Request failed');
+  return data;
+}}
+
+// Resolve guildId → display name via the gateway, then clear any
+// opt-out blocking this plugin from assigning roles in that server.
+// Idempotent: clearing rows that don't exist is a no-op on the server.
+async function applyGuildContext() {{
+  if (!guildId) return;
+  let prefs;
+  try {{
+    prefs = await gatewayApi('GET', '/auth/preferences');
+  }} catch (e) {{
+    // Not a fatal failure for the verify flow — just skip the banner.
+    return;
+  }}
+  const g = (prefs.guilds || []).find(x => x.guild_id === guildId);
+  if (!g) {{
+    // Either the user isn't in that guild, or the gateway hasn't
+    // refreshed their guild list yet. Surface it gently — the role
+    // just won't apply until they're a member.
+    showGuildCtx("You're not in that server yet — join it on Discord, then refresh.", true);
+    return;
+  }}
+  const safeName = (g.guild_name || '(unnamed server)')
+    .replace(/[&<>"']/g, c => ({{'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}})[c]);
+  const wasDisabled = g.master_optout || (g.plugin_optouts || []).includes(PLUGIN_SLUG);
+  // Always clear both — the master toggle wins over per-plugin
+  // overrides, so we need to remove it too even if only the
+  // per-plugin row was set on this server.
+  try {{
+    if (g.master_optout) {{
+      await gatewayApi('POST', '/auth/preferences', {{
+        guild_id: guildId, plugin: null, enabled: true,
+      }});
+    }}
+    if ((g.plugin_optouts || []).includes(PLUGIN_SLUG)) {{
+      await gatewayApi('POST', '/auth/preferences', {{
+        guild_id: guildId, plugin: PLUGIN_SLUG, enabled: true,
+      }});
+    }}
+  }} catch (e) {{
+    // Even if the clear failed, still show the banner so the user
+    // knows where they are. The role will simply not apply until
+    // they fix it manually via /auth/my_servers.
+  }}
+  const nameHtml = '<span class="gctx-name">' + safeName + '</span>';
+  if (wasDisabled) {{
+    showGuildCtx('Enabled Member Origin roles for ' + nameHtml + ' — roles apply on the next sync.');
+  }} else {{
+    showGuildCtx('Member Origin roles are active in ' + nameHtml + '.');
+  }}
 }}
 
 function renderMeta(ctx) {{
@@ -289,6 +404,8 @@ async function init() {{
     document.getElementById('username').textContent = status.display_name;
     show('collected');
     await collectData();
+    // Session is valid — apply the per-guild side effects (if any).
+    applyGuildContext();
   }} catch(e) {{
     show('login');
   }}
@@ -357,6 +474,54 @@ p{{color:#8b949e;font-size:.95rem;line-height:1.5}}
 
 <script>
 const BASE = '{base_url}';
+const PLUGIN_SLUG = 'member-origin-role';
+
+// Optional ?guild=<id> from a per-guild verify link. Even in silent
+// mode we need to preserve it across the OAuth round-trip so a returning
+// user lands back on the same per-guild URL after sign-in, and we use it
+// post-auth to silently clear any opt-out for that server.
+const guildId = (() => {{
+  try {{
+    const v = new URLSearchParams(window.location.search).get('guild');
+    return v && /^[0-9]{{5,25}}$/.test(v) ? v : '';
+  }} catch (e) {{ return ''; }}
+}})();
+
+async function gatewayApi(method, path, body) {{
+  const opts = {{ method, credentials: 'include', headers: {{}} }};
+  if (body) {{
+    opts.headers['Content-Type'] = 'application/json';
+    opts.body = JSON.stringify(body);
+  }}
+  const res = await fetch(path, opts);
+  const data = await res.json().catch(() => ({{}}));
+  if (!res.ok) throw new Error(data.error || 'Request failed');
+  return data;
+}}
+
+// Silent variant of applyGuildContext — no banner, no UI; just clears
+// the opt-out rows blocking this plugin in the target guild. Best-effort:
+// any failure is swallowed so the anonymous page stays silent.
+async function applyGuildContextSilent() {{
+  if (!guildId) return;
+  let prefs;
+  try {{ prefs = await gatewayApi('GET', '/auth/preferences'); }}
+  catch (e) {{ return; }}
+  const g = (prefs.guilds || []).find(x => x.guild_id === guildId);
+  if (!g) return;
+  try {{
+    if (g.master_optout) {{
+      await gatewayApi('POST', '/auth/preferences', {{
+        guild_id: guildId, plugin: null, enabled: true,
+      }});
+    }}
+    if ((g.plugin_optouts || []).includes(PLUGIN_SLUG)) {{
+      await gatewayApi('POST', '/auth/preferences', {{
+        guild_id: guildId, plugin: PLUGIN_SLUG, enabled: true,
+      }});
+    }}
+  }} catch (e) {{}}
+}}
 
 const TS_ENABLED = {ts_enabled};
 let tsToken = null;
@@ -388,9 +553,20 @@ async function run() {{
   }} catch(e) {{}}
 
   if (!signedIn) {{
-    window.location.replace(BASE + '/verify/login');
+    // Preserve ?guild= across the OAuth round-trip — the server-side
+    // /verify/login redirect would otherwise drop it.
+    let url = BASE + '/verify/login';
+    if (guildId) {{
+      const returnTo = '/member-origin-role/verify?guild=' + encodeURIComponent(guildId);
+      url = '/auth/login?return_to=' + encodeURIComponent(returnTo);
+    }}
+    window.location.replace(url);
     return;
   }}
+
+  // Signed in — clear any per-guild opt-out silently before/while we
+  // collect identity. No banner in anonymous mode.
+  applyGuildContextSilent();
 
   try {{
     const token = await waitForToken();

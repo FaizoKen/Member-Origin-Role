@@ -449,13 +449,20 @@ async fn fetch_guild_permission(
     Ok((is_member, is_manager))
 }
 
+/// Call the Auth Gateway's `/auth/guild_members` endpoint.
+/// Returns `(member_discord_ids, optional_guild_name)`.
+///
+/// Passes the plugin slug so users who opted out of this plugin (or the
+/// whole guild) are stripped from the returned member set — the
+/// downstream JOIN against `web_contexts` then naturally excludes them
+/// from the public members list.
 async fn fetch_guild_members(
     state: &Arc<AppState>,
     guild_id: &str,
     session_cookie_value: &str,
 ) -> Result<(Vec<String>, Option<String>), AppError> {
     let path = format!(
-        "/auth/guild_members?guild_id={}",
+        "/auth/guild_members?guild_id={}&plugin=member-origin-role",
         urlencoding::encode(guild_id)
     );
     let body = auth_gateway_get(state, &path, session_cookie_value).await?;
