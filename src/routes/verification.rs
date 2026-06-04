@@ -282,7 +282,7 @@ async function applyGuildContext() {{
   if (!guildId) return;
   let prefs;
   try {{
-    prefs = await gatewayApi('GET', '/auth/preferences');
+    prefs = await gatewayApi('GET', '/auth/preferences?ensure_guild=' + encodeURIComponent(guildId));
   }} catch (e) {{
     // Not a fatal failure for the verify flow — just skip the banner.
     return;
@@ -505,7 +505,7 @@ async function gatewayApi(method, path, body) {{
 async function applyGuildContextSilent() {{
   if (!guildId) return;
   let prefs;
-  try {{ prefs = await gatewayApi('GET', '/auth/preferences'); }}
+  try {{ prefs = await gatewayApi('GET', '/auth/preferences?ensure_guild=' + encodeURIComponent(guildId)); }}
   catch (e) {{ return; }}
   const g = (prefs.guilds || []).find(x => x.guild_id === guildId);
   if (!g) return;
