@@ -70,14 +70,23 @@ pub fn evaluate(conditions: &WebConditions, ctx: &WebContextRow) -> bool {
         ConditionField::Browser => ctx.browser.as_deref(),
         ConditionField::DeviceType => ctx.device_type.as_deref(),
         ConditionField::UtcOffset => {
-            return compare_int(ctx.utc_offset.map(|v| v as i64), &operator, &conditions.value, &conditions.value_end);
+            return compare_int(
+                ctx.utc_offset.map(|v| v as i64),
+                &operator,
+                &conditions.value,
+                &conditions.value_end,
+            );
         }
     };
 
     compare_text(actual, &operator, &conditions.value)
 }
 
-fn compare_text(actual: Option<&str>, operator: &ConditionOperator, expected: &serde_json::Value) -> bool {
+fn compare_text(
+    actual: Option<&str>,
+    operator: &ConditionOperator,
+    expected: &serde_json::Value,
+) -> bool {
     let Some(actual) = actual else {
         return false;
     };
@@ -89,7 +98,12 @@ fn compare_text(actual: Option<&str>, operator: &ConditionOperator, expected: &s
     }
 }
 
-fn compare_int(actual: Option<i64>, operator: &ConditionOperator, expected: &serde_json::Value, value_end: &Option<serde_json::Value>) -> bool {
+fn compare_int(
+    actual: Option<i64>,
+    operator: &ConditionOperator,
+    expected: &serde_json::Value,
+    value_end: &Option<serde_json::Value>,
+) -> bool {
     let Some(actual) = actual else {
         return false;
     };
@@ -102,7 +116,10 @@ fn compare_int(actual: Option<i64>, operator: &ConditionOperator, expected: &ser
         ConditionOperator::Lt => actual < expected,
         ConditionOperator::Lte => actual <= expected,
         ConditionOperator::Between => {
-            let end = value_end.as_ref().and_then(|v| v.as_i64()).unwrap_or(expected);
+            let end = value_end
+                .as_ref()
+                .and_then(|v| v.as_i64())
+                .unwrap_or(expected);
             actual >= expected && actual <= end
         }
     }
@@ -144,22 +161,34 @@ mod tests {
 
     #[test]
     fn test_country_eq() {
-        assert!(evaluate(&cond("country", "eq", json!("US")), &sample_context()));
+        assert!(evaluate(
+            &cond("country", "eq", json!("US")),
+            &sample_context()
+        ));
     }
 
     #[test]
     fn test_country_case_insensitive() {
-        assert!(evaluate(&cond("country", "eq", json!("us")), &sample_context()));
+        assert!(evaluate(
+            &cond("country", "eq", json!("us")),
+            &sample_context()
+        ));
     }
 
     #[test]
     fn test_country_neq() {
-        assert!(evaluate(&cond("country", "neq", json!("JP")), &sample_context()));
+        assert!(evaluate(
+            &cond("country", "neq", json!("JP")),
+            &sample_context()
+        ));
     }
 
     #[test]
     fn test_platform_eq() {
-        assert!(evaluate(&cond("platform", "eq", json!("Windows")), &sample_context()));
+        assert!(evaluate(
+            &cond("platform", "eq", json!("Windows")),
+            &sample_context()
+        ));
     }
 
     #[test]

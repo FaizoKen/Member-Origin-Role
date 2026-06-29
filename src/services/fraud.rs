@@ -96,17 +96,21 @@ fn validate_offset_for_timezone(timezone: &str, offset_minutes: i32) -> bool {
 fn country_offset_plausible(country: &str, offset_minutes: i32) -> bool {
     let valid_offsets: &[i32] = match country.to_uppercase().as_str() {
         // Americas
-        "US" => &[-300, -240, -360, -300, -420, -360, -480, -420, -540, -480, -600], // EST..HST + DST
-        "CA" => &[-210, -150, -240, -180, -300, -240, -360, -300, -420, -360, -480, -420], // NST..PST + DST
+        "US" => &[
+            -300, -240, -360, -300, -420, -360, -480, -420, -540, -480, -600,
+        ], // EST..HST + DST
+        "CA" => &[
+            -210, -150, -240, -180, -300, -240, -360, -300, -420, -360, -480, -420,
+        ], // NST..PST + DST
         "MX" => &[-300, -360, -300, -420, -360],
         "BR" => &[-120, -180, -240, -300],
         "AR" => &[-180],
         "CL" => &[-180, -240],
         "CO" | "PE" | "EC" => &[-300],
         // Europe
-        "GB" | "IE" | "PT" => &[0, 60],          // GMT/BST
-        "DE" | "FR" | "IT" | "ES" | "NL" | "BE" | "AT" | "CH" | "SE" | "NO" | "DK"
-        | "PL" | "CZ" | "HU" | "HR" | "SK" | "SI" => &[60, 120], // CET/CEST
+        "GB" | "IE" | "PT" => &[0, 60], // GMT/BST
+        "DE" | "FR" | "IT" | "ES" | "NL" | "BE" | "AT" | "CH" | "SE" | "NO" | "DK" | "PL"
+        | "CZ" | "HU" | "HR" | "SK" | "SI" => &[60, 120], // CET/CEST
         "FI" | "EE" | "LV" | "LT" | "RO" | "BG" | "GR" | "UA" => &[120, 180], // EET/EEST
         "RU" => &[120, 180, 240, 300, 360, 420, 480, 540, 600, 660, 720], // Russia spans many zones
         "TR" => &[180],
@@ -124,8 +128,8 @@ fn country_offset_plausible(country: &str, offset_minutes: i32) -> bool {
         "IL" => &[120, 180],
         "IR" => &[210, 270],
         // Oceania
-        "AU" => &[480, 525, 570, 600, 630, 660],  // AWST..AEDT
-        "NZ" => &[720, 780],                       // NZST/NZDT
+        "AU" => &[480, 525, 570, 600, 630, 660], // AWST..AEDT
+        "NZ" => &[720, 780],                     // NZST/NZDT
         // Africa
         "ZA" => &[120],
         "EG" => &[120, 180],
@@ -167,26 +171,63 @@ fn platform_device_consistent(platform: &str, device_type: &str) -> bool {
 fn timezone_country_consistent(timezone: &str, country: &str) -> bool {
     let expected: Option<&[&str]> = match timezone {
         // United States
-        "America/New_York" | "America/Detroit" | "America/Indiana/Indianapolis"
-        | "America/Indiana/Knox" | "America/Indiana/Marengo" | "America/Indiana/Petersburg"
-        | "America/Indiana/Tell_City" | "America/Indiana/Vevay" | "America/Indiana/Vincennes"
-        | "America/Indiana/Winamac" | "America/Kentucky/Louisville"
-        | "America/Kentucky/Monticello" | "America/Chicago" | "America/Menominee"
-        | "America/North_Dakota/Beulah" | "America/North_Dakota/Center"
-        | "America/North_Dakota/New_Salem" | "America/Denver" | "America/Boise"
-        | "America/Phoenix" | "America/Los_Angeles" | "America/Anchorage" | "America/Juneau"
-        | "America/Sitka" | "America/Metlakatla" | "America/Yakutat" | "America/Nome"
-        | "America/Adak" | "Pacific/Honolulu" => Some(&["US"]),
+        "America/New_York"
+        | "America/Detroit"
+        | "America/Indiana/Indianapolis"
+        | "America/Indiana/Knox"
+        | "America/Indiana/Marengo"
+        | "America/Indiana/Petersburg"
+        | "America/Indiana/Tell_City"
+        | "America/Indiana/Vevay"
+        | "America/Indiana/Vincennes"
+        | "America/Indiana/Winamac"
+        | "America/Kentucky/Louisville"
+        | "America/Kentucky/Monticello"
+        | "America/Chicago"
+        | "America/Menominee"
+        | "America/North_Dakota/Beulah"
+        | "America/North_Dakota/Center"
+        | "America/North_Dakota/New_Salem"
+        | "America/Denver"
+        | "America/Boise"
+        | "America/Phoenix"
+        | "America/Los_Angeles"
+        | "America/Anchorage"
+        | "America/Juneau"
+        | "America/Sitka"
+        | "America/Metlakatla"
+        | "America/Yakutat"
+        | "America/Nome"
+        | "America/Adak"
+        | "Pacific/Honolulu" => Some(&["US"]),
         // Canada
-        "America/Toronto" | "America/Iqaluit" | "America/Winnipeg" | "America/Resolute"
-        | "America/Rankin_Inlet" | "America/Regina" | "America/Swift_Current"
-        | "America/Edmonton" | "America/Cambridge_Bay" | "America/Inuvik"
-        | "America/Dawson_Creek" | "America/Fort_Nelson" | "America/Creston"
-        | "America/Vancouver" | "America/Whitehorse" | "America/Dawson"
-        | "America/St_Johns" | "America/Halifax" | "America/Glace_Bay"
-        | "America/Moncton" | "America/Goose_Bay" | "America/Blanc-Sablon"
-        | "America/Nipigon" | "America/Thunder_Bay" | "America/Rainy_River"
-        | "America/Atikokan" | "America/Yellowknife" => Some(&["CA"]),
+        "America/Toronto"
+        | "America/Iqaluit"
+        | "America/Winnipeg"
+        | "America/Resolute"
+        | "America/Rankin_Inlet"
+        | "America/Regina"
+        | "America/Swift_Current"
+        | "America/Edmonton"
+        | "America/Cambridge_Bay"
+        | "America/Inuvik"
+        | "America/Dawson_Creek"
+        | "America/Fort_Nelson"
+        | "America/Creston"
+        | "America/Vancouver"
+        | "America/Whitehorse"
+        | "America/Dawson"
+        | "America/St_Johns"
+        | "America/Halifax"
+        | "America/Glace_Bay"
+        | "America/Moncton"
+        | "America/Goose_Bay"
+        | "America/Blanc-Sablon"
+        | "America/Nipigon"
+        | "America/Thunder_Bay"
+        | "America/Rainy_River"
+        | "America/Atikokan"
+        | "America/Yellowknife" => Some(&["CA"]),
         // UK / Ireland
         "Europe/London" => Some(&["GB", "IE"]),
         // Central Europe
@@ -241,19 +282,38 @@ fn timezone_country_consistent(timezone: &str, country: &str) -> bool {
         "Asia/Tehran" => Some(&["IR"]),
         "Asia/Baghdad" => Some(&["IQ"]),
         // Oceania
-        "Australia/Sydney" | "Australia/Melbourne" | "Australia/Brisbane"
-        | "Australia/Hobart" | "Australia/Adelaide" | "Australia/Darwin"
-        | "Australia/Perth" | "Australia/Lord_Howe" => Some(&["AU"]),
+        "Australia/Sydney"
+        | "Australia/Melbourne"
+        | "Australia/Brisbane"
+        | "Australia/Hobart"
+        | "Australia/Adelaide"
+        | "Australia/Darwin"
+        | "Australia/Perth"
+        | "Australia/Lord_Howe" => Some(&["AU"]),
         "Pacific/Auckland" | "Pacific/Chatham" => Some(&["NZ"]),
         // Latin America
-        "America/Sao_Paulo" | "America/Noronha" | "America/Bahia" | "America/Fortaleza"
-        | "America/Recife" | "America/Manaus" | "America/Belem" | "America/Cuiaba"
-        | "America/Porto_Velho" | "America/Boa_Vista" | "America/Campo_Grande"
+        "America/Sao_Paulo"
+        | "America/Noronha"
+        | "America/Bahia"
+        | "America/Fortaleza"
+        | "America/Recife"
+        | "America/Manaus"
+        | "America/Belem"
+        | "America/Cuiaba"
+        | "America/Porto_Velho"
+        | "America/Boa_Vista"
+        | "America/Campo_Grande"
         | "America/Rio_Branco" => Some(&["BR"]),
-        "America/Mexico_City" | "America/Cancun" | "America/Merida" | "America/Monterrey"
-        | "America/Chihuahua" | "America/Mazatlan" | "America/Hermosillo"
+        "America/Mexico_City"
+        | "America/Cancun"
+        | "America/Merida"
+        | "America/Monterrey"
+        | "America/Chihuahua"
+        | "America/Mazatlan"
+        | "America/Hermosillo"
         | "America/Tijuana" => Some(&["MX"]),
-        "America/Argentina/Buenos_Aires" | "America/Argentina/Cordoba"
+        "America/Argentina/Buenos_Aires"
+        | "America/Argentina/Cordoba"
         | "America/Argentina/Mendoza" => Some(&["AR"]),
         "America/Santiago" => Some(&["CL"]),
         "America/Bogota" => Some(&["CO"]),
@@ -302,20 +362,21 @@ fn timezone_to_continent(tz: &str) -> Option<&'static str> {
 fn country_to_continent(code: &str) -> Option<&'static str> {
     match code.to_uppercase().as_str() {
         "US" | "CA" | "MX" | "BR" | "AR" | "CL" | "CO" | "PE" | "VE" | "EC" | "BO" | "PY"
-        | "UY" | "PA" | "CR" | "GT" | "HN" | "SV" | "NI" | "CU" | "DO" | "HT" | "JM"
-        | "TT" | "BB" | "BS" | "BZ" | "PR" => Some("americas"),
+        | "UY" | "PA" | "CR" | "GT" | "HN" | "SV" | "NI" | "CU" | "DO" | "HT" | "JM" | "TT"
+        | "BB" | "BS" | "BZ" | "PR" => Some("americas"),
         "GB" | "DE" | "FR" | "IT" | "ES" | "NL" | "BE" | "PT" | "AT" | "CH" | "SE" | "NO"
-        | "DK" | "FI" | "PL" | "CZ" | "RO" | "HU" | "IE" | "GR" | "BG" | "HR" | "SK"
-        | "SI" | "LT" | "LV" | "EE" | "RS" | "BA" | "AL" | "MK" | "ME" | "IS" | "LU"
-        | "MT" | "CY" | "MD" | "UA" | "BY" | "RU" => Some("europe"),
+        | "DK" | "FI" | "PL" | "CZ" | "RO" | "HU" | "IE" | "GR" | "BG" | "HR" | "SK" | "SI"
+        | "LT" | "LV" | "EE" | "RS" | "BA" | "AL" | "MK" | "ME" | "IS" | "LU" | "MT" | "CY"
+        | "MD" | "UA" | "BY" | "RU" => Some("europe"),
         "JP" | "CN" | "KR" | "IN" | "SG" | "MY" | "TH" | "VN" | "PH" | "ID" | "TW" | "HK"
-        | "MO" | "BD" | "PK" | "LK" | "NP" | "MM" | "KH" | "LA" | "BN" | "MN" | "KZ"
-        | "UZ" | "AF" | "IQ" | "IR" | "SA" | "AE" | "QA" | "KW" | "BH" | "OM" | "YE"
-        | "JO" | "LB" | "SY" | "IL" | "PS" | "TR" | "GE" | "AM" | "AZ" => Some("asia"),
+        | "MO" | "BD" | "PK" | "LK" | "NP" | "MM" | "KH" | "LA" | "BN" | "MN" | "KZ" | "UZ"
+        | "AF" | "IQ" | "IR" | "SA" | "AE" | "QA" | "KW" | "BH" | "OM" | "YE" | "JO" | "LB"
+        | "SY" | "IL" | "PS" | "TR" | "GE" | "AM" | "AZ" => Some("asia"),
         "AU" | "NZ" | "FJ" | "PG" => Some("oceania"),
-        "ZA" | "NG" | "EG" | "KE" | "GH" | "TZ" | "ET" | "MA" | "TN" | "DZ" | "SD"
-        | "UG" | "CM" | "CI" | "SN" | "MG" | "MZ" | "ZM" | "ZW" | "BW" | "NA" | "RW"
-        | "CD" | "AO" => Some("africa"),
+        "ZA" | "NG" | "EG" | "KE" | "GH" | "TZ" | "ET" | "MA" | "TN" | "DZ" | "SD" | "UG"
+        | "CM" | "CI" | "SN" | "MG" | "MZ" | "ZM" | "ZW" | "BW" | "NA" | "RW" | "CD" | "AO" => {
+            Some("africa")
+        }
         _ => None,
     }
 }
@@ -449,7 +510,10 @@ mod tests {
         // Via + XFF are infrastructure, not VPN
         let mut h = HeaderMap::new();
         h.insert("via", "1.1 cloudflare".parse().unwrap());
-        h.insert("x-forwarded-for", "1.2.3.4, 5.6.7.8, 9.10.11.12".parse().unwrap());
+        h.insert(
+            "x-forwarded-for",
+            "1.2.3.4, 5.6.7.8, 9.10.11.12".parse().unwrap(),
+        );
         assert!(!detect_vpn(&h, "Asia/Kuala_Lumpur", Some("MY")));
     }
 
@@ -459,20 +523,41 @@ mod tests {
     fn test_offset_matches_timezone() {
         // EST is UTC-5 = -300 minutes. This should pass if we're currently in EST.
         // Use a timezone that doesn't observe DST for a stable test.
-        assert!(!detect_spoofing("Asia/Tokyo", 540, Some("JP"), "Windows", "Chrome", "Desktop"));
+        assert!(!detect_spoofing(
+            "Asia/Tokyo",
+            540,
+            Some("JP"),
+            "Windows",
+            "Chrome",
+            "Desktop"
+        ));
     }
 
     #[test]
     fn test_offset_mismatch_timezone() {
         // Claiming Asia/Tokyo (UTC+9 = +540) but sending EST offset (-300)
-        assert!(detect_spoofing("Asia/Tokyo", -300, Some("JP"), "Windows", "Chrome", "Desktop"));
+        assert!(detect_spoofing(
+            "Asia/Tokyo",
+            -300,
+            Some("JP"),
+            "Windows",
+            "Chrome",
+            "Desktop"
+        ));
     }
 
     // ── Spoofing: offset vs country ──
 
     #[test]
     fn test_offset_plausible_for_country() {
-        assert!(!detect_spoofing("Asia/Tokyo", 540, Some("JP"), "Windows", "Chrome", "Desktop"));
+        assert!(!detect_spoofing(
+            "Asia/Tokyo",
+            540,
+            Some("JP"),
+            "Windows",
+            "Chrome",
+            "Desktop"
+        ));
     }
 
     #[test]
@@ -480,31 +565,46 @@ mod tests {
         // Claiming JP country with correct JP timezone but wrong offset (US Eastern)
         let us_offset = current_offset("America/New_York");
         // This fails check 1 (offset vs timezone) since Asia/Tokyo offset != US offset
-        assert!(detect_spoofing("Asia/Tokyo", us_offset, Some("JP"), "Windows", "Chrome", "Desktop"));
+        assert!(detect_spoofing(
+            "Asia/Tokyo",
+            us_offset,
+            Some("JP"),
+            "Windows",
+            "Chrome",
+            "Desktop"
+        ));
     }
 
     // ── Spoofing: platform/browser ──
 
     #[test]
     fn test_safari_on_linux_impossible() {
-        assert!(detect_spoofing("Etc/UTC", 0, None, "Linux", "Safari", "Desktop"));
+        assert!(detect_spoofing(
+            "Etc/UTC", 0, None, "Linux", "Safari", "Desktop"
+        ));
     }
 
     #[test]
     fn test_chrome_on_linux_ok() {
-        assert!(!detect_spoofing("Etc/UTC", 0, None, "Linux", "Chrome", "Desktop"));
+        assert!(!detect_spoofing(
+            "Etc/UTC", 0, None, "Linux", "Chrome", "Desktop"
+        ));
     }
 
     // ── Spoofing: platform/device ──
 
     #[test]
     fn test_android_desktop_impossible() {
-        assert!(detect_spoofing("Etc/UTC", 0, None, "Android", "Chrome", "Desktop"));
+        assert!(detect_spoofing(
+            "Etc/UTC", 0, None, "Android", "Chrome", "Desktop"
+        ));
     }
 
     #[test]
     fn test_windows_desktop_ok() {
-        assert!(!detect_spoofing("Etc/UTC", 0, None, "Windows", "Chrome", "Desktop"));
+        assert!(!detect_spoofing(
+            "Etc/UTC", 0, None, "Windows", "Chrome", "Desktop"
+        ));
     }
 
     // ── Spoofing: timezone vs country (country-level) ──
@@ -521,7 +621,14 @@ mod tests {
     #[test]
     fn test_us_timezone_us_country() {
         let offset = current_offset("America/New_York");
-        assert!(!detect_spoofing("America/New_York", offset, Some("US"), "Windows", "Chrome", "Desktop"));
+        assert!(!detect_spoofing(
+            "America/New_York",
+            offset,
+            Some("US"),
+            "Windows",
+            "Chrome",
+            "Desktop"
+        ));
     }
 
     #[test]
@@ -529,13 +636,27 @@ mod tests {
         // User on VPN to JP, spoofed timezone to Asia/Tokyo, but offset still reveals US location
         let us_offset = current_offset("America/New_York");
         // offset is US value but country is JP → check 2 (offset vs country) catches this
-        assert!(detect_spoofing("America/New_York", us_offset, Some("JP"), "Windows", "Chrome", "Desktop"));
+        assert!(detect_spoofing(
+            "America/New_York",
+            us_offset,
+            Some("JP"),
+            "Windows",
+            "Chrome",
+            "Desktop"
+        ));
     }
 
     #[test]
     fn test_clean_data_no_spoofing() {
         let offset = current_offset("America/Guayaquil");
-        assert!(!detect_spoofing("America/Guayaquil", offset, Some("EC"), "Windows", "Chrome", "Desktop"));
+        assert!(!detect_spoofing(
+            "America/Guayaquil",
+            offset,
+            Some("EC"),
+            "Windows",
+            "Chrome",
+            "Desktop"
+        ));
     }
 
     // ── Impossible travel ──
@@ -543,36 +664,66 @@ mod tests {
     #[test]
     fn test_same_country_no_travel() {
         let now = Utc::now();
-        assert!(!detect_impossible_travel(Some("US"), Some("US"), Some(now - Duration::minutes(5)), now));
+        assert!(!detect_impossible_travel(
+            Some("US"),
+            Some("US"),
+            Some(now - Duration::minutes(5)),
+            now
+        ));
     }
 
     #[test]
     fn test_us_to_jp_1hr_impossible() {
         let now = Utc::now();
-        assert!(detect_impossible_travel(Some("JP"), Some("US"), Some(now - Duration::hours(1)), now));
+        assert!(detect_impossible_travel(
+            Some("JP"),
+            Some("US"),
+            Some(now - Duration::hours(1)),
+            now
+        ));
     }
 
     #[test]
     fn test_us_to_jp_24hr_ok() {
         let now = Utc::now();
-        assert!(!detect_impossible_travel(Some("JP"), Some("US"), Some(now - Duration::hours(24)), now));
+        assert!(!detect_impossible_travel(
+            Some("JP"),
+            Some("US"),
+            Some(now - Duration::hours(24)),
+            now
+        ));
     }
 
     #[test]
     fn test_us_to_gb_3hr_impossible() {
         let now = Utc::now();
-        assert!(detect_impossible_travel(Some("GB"), Some("US"), Some(now - Duration::hours(3)), now));
+        assert!(detect_impossible_travel(
+            Some("GB"),
+            Some("US"),
+            Some(now - Duration::hours(3)),
+            now
+        ));
     }
 
     #[test]
     fn test_us_to_gb_8hr_ok() {
         let now = Utc::now();
-        assert!(!detect_impossible_travel(Some("GB"), Some("US"), Some(now - Duration::hours(8)), now));
+        assert!(!detect_impossible_travel(
+            Some("GB"),
+            Some("US"),
+            Some(now - Duration::hours(8)),
+            now
+        ));
     }
 
     #[test]
     fn test_no_prev_country() {
-        assert!(!detect_impossible_travel(Some("US"), None, None, Utc::now()));
+        assert!(!detect_impossible_travel(
+            Some("US"),
+            None,
+            None,
+            Utc::now()
+        ));
     }
 
     // ── Discord snowflake → created_at ──

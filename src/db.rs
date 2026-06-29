@@ -48,10 +48,12 @@ pub async fn run_migrations(pool: &PgPool) {
         .await
         .expect("Failed to run migration 007");
 
-    sqlx::raw_sql(include_str!("../migrations/008_web_context_discord_name.sql"))
-        .execute(pool)
-        .await
-        .expect("Failed to run migration 008");
+    sqlx::raw_sql(include_str!(
+        "../migrations/008_web_context_discord_name.sql"
+    ))
+    .execute(pool)
+    .await
+    .expect("Failed to run migration 008");
 
     sqlx::raw_sql(include_str!("../migrations/009_advanced_fraud.sql"))
         .execute(pool)

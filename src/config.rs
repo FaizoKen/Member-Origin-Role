@@ -26,7 +26,10 @@ pub struct AppConfig {
 
 /// Read an env var, treating empty / whitespace-only as unset.
 fn opt_env(key: &str) -> Option<String> {
-    env::var(key).ok().map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+    env::var(key)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 /// Extract the origin (scheme://host[:port]) from BASE_URL, dropping any path prefix.

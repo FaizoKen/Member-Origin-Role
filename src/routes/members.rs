@@ -22,16 +22,16 @@ pub struct MembersQuery {
 
 fn sort_column(key: &str) -> Option<&'static str> {
     match key {
-        "discord_name"      => Some("wc.discord_name"),
-        "country"           => Some("wc.country"),
-        "timezone"          => Some("wc.timezone"),
-        "language"          => Some("wc.language"),
-        "platform"          => Some("wc.platform"),
-        "browser"           => Some("wc.browser"),
-        "device_type"       => Some("wc.device_type"),
-        "account_created_at"=> Some("wc.account_created_at"),
-        "visit_count"       => Some("wc.visit_count"),
-        "last_visit"        => Some("wc.last_visit"),
+        "discord_name" => Some("wc.discord_name"),
+        "country" => Some("wc.country"),
+        "timezone" => Some("wc.timezone"),
+        "language" => Some("wc.language"),
+        "platform" => Some("wc.platform"),
+        "browser" => Some("wc.browser"),
+        "device_type" => Some("wc.device_type"),
+        "account_created_at" => Some("wc.account_created_at"),
+        "visit_count" => Some("wc.visit_count"),
+        "last_visit" => Some("wc.last_visit"),
         _ => None,
     }
 }
@@ -429,9 +429,9 @@ async fn auth_gateway_get(
         )));
     }
 
-    resp.json::<Value>().await.map_err(|e| {
-        AppError::Internal(format!("Auth Gateway parse error: {e}"))
-    })
+    resp.json::<Value>()
+        .await
+        .map_err(|e| AppError::Internal(format!("Auth Gateway parse error: {e}")))
 }
 
 async fn fetch_guild_permission(
@@ -444,8 +444,14 @@ async fn fetch_guild_permission(
         urlencoding::encode(guild_id)
     );
     let body = auth_gateway_get(state, &path, session_cookie_value).await?;
-    let is_member = body.get("is_member").and_then(|v| v.as_bool()).unwrap_or(false);
-    let is_manager = body.get("is_manager").and_then(|v| v.as_bool()).unwrap_or(false);
+    let is_member = body
+        .get("is_member")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let is_manager = body
+        .get("is_manager")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     Ok((is_member, is_manager))
 }
 
@@ -469,9 +475,16 @@ async fn fetch_guild_members(
     let discord_ids: Vec<String> = body
         .get("discord_ids")
         .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_str().map(String::from))
+                .collect()
+        })
         .unwrap_or_default();
-    let guild_name = body.get("guild_name").and_then(|v| v.as_str()).map(String::from);
+    let guild_name = body
+        .get("guild_name")
+        .and_then(|v| v.as_str())
+        .map(String::from);
     Ok((discord_ids, guild_name))
 }
 
@@ -483,9 +496,7 @@ pub async fn members_data(
 ) -> Result<Json<Value>, AppError> {
     // 1. Require a valid session cookie.
     let session_cookie = jar.get("rl_session").ok_or_else(|| {
-        AppError::UnauthorizedWith(
-            "No session cookie found. Please log in again.".into(),
-        )
+        AppError::UnauthorizedWith("No session cookie found. Please log in again.".into())
     })?;
 
     let (viewer_discord_id, _) =
@@ -509,8 +520,7 @@ pub async fn members_data(
     .fetch_optional(&state.pool)
     .await?;
 
-    let (has_link, view_permission) =
-        guild_row.unwrap_or((false, "managers".to_string()));
+    let (has_link, view_permission) = guild_row.unwrap_or((false, "managers".to_string()));
     if !has_link {
         return Err(AppError::NotFound(
             "No member list is configured for this server.".into(),
@@ -519,8 +529,7 @@ pub async fn members_data(
     let members_allowed = view_permission == "members";
 
     // 3. Ask the Auth Gateway for guild membership + manager status.
-    let (_, is_manager) =
-        fetch_guild_permission(&state, &guild_id, session_cookie.value()).await?;
+    let (_, is_manager) = fetch_guild_permission(&state, &guild_id, session_cookie.value()).await?;
 
     let (member_ids, ag_guild_name) =
         fetch_guild_members(&state, &guild_id, session_cookie.value()).await?;

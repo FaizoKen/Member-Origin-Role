@@ -18,8 +18,14 @@ pub fn build_config_schema(
     values.insert("operator_text".into(), json!(conditions.operator));
     values.insert("block_vpn".into(), json!(conditions.block_vpn));
     values.insert("block_spoofing".into(), json!(conditions.block_spoofing));
-    values.insert("block_impossible_travel".into(), json!(conditions.block_impossible_travel));
-    values.insert("min_account_age_days".into(), json!(conditions.min_account_age_days));
+    values.insert(
+        "block_impossible_travel".into(),
+        json!(conditions.block_impossible_travel),
+    );
+    values.insert(
+        "min_account_age_days".into(),
+        json!(conditions.min_account_age_days),
+    );
     values.insert("anonymous_mode".into(), json!(conditions.anonymous_mode));
     values.insert("view_permission".into(), json!(view_permission));
 
@@ -277,10 +283,7 @@ pub fn build_config_schema(
 }
 
 pub fn parse_config(config: &HashMap<String, Value>) -> Result<WebConditions, AppError> {
-    let field_key = config
-        .get("field")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+    let field_key = config.get("field").and_then(|v| v.as_str()).unwrap_or("");
 
     if field_key.is_empty() {
         return Err(AppError::BadRequest("Field is required".into()));
@@ -291,18 +294,22 @@ pub fn parse_config(config: &HashMap<String, Value>) -> Result<WebConditions, Ap
 
     // Numeric fields use "operator" key, text/select fields use "operator_text" key
     let op_key = if field.is_numeric() {
-        config.get("operator").and_then(|v| v.as_str()).unwrap_or("gte")
+        config
+            .get("operator")
+            .and_then(|v| v.as_str())
+            .unwrap_or("gte")
     } else {
-        config.get("operator_text").and_then(|v| v.as_str()).unwrap_or("eq")
+        config
+            .get("operator_text")
+            .and_then(|v| v.as_str())
+            .unwrap_or("eq")
     };
 
     let operator = ConditionOperator::from_key(op_key)
         .ok_or_else(|| AppError::BadRequest(format!("Invalid operator '{op_key}'")))?;
 
     // Non-numeric fields only support eq/neq
-    if !field.is_numeric()
-        && !matches!(operator, ConditionOperator::Eq | ConditionOperator::Neq)
-    {
+    if !field.is_numeric() && !matches!(operator, ConditionOperator::Eq | ConditionOperator::Neq) {
         return Err(AppError::BadRequest(
             "Only '= equals' and '\u{2260} not equals' are supported for this field".into(),
         ));
@@ -314,8 +321,13 @@ pub fn parse_config(config: &HashMap<String, Value>) -> Result<WebConditions, Ap
 
     let value = if field.is_numeric() {
         let n = raw_value
-            .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse::<i64>().ok())))
-            .ok_or_else(|| AppError::BadRequest(format!("Value must be a number for '{field_key}'")))?;
+            .and_then(|v| {
+                v.as_i64()
+                    .or_else(|| v.as_str().and_then(|s| s.parse::<i64>().ok()))
+            })
+            .ok_or_else(|| {
+                AppError::BadRequest(format!("Value must be a number for '{field_key}'"))
+            })?;
         json!(n)
     } else if field.is_select() {
         let s = raw_value.and_then(|v| v.as_str()).unwrap_or("");
@@ -341,8 +353,13 @@ pub fn parse_config(config: &HashMap<String, Value>) -> Result<WebConditions, Ap
         let end_key = format!("value_end_{field_key}");
         let raw_end = config.get(&end_key).or_else(|| config.get("value_end"));
         let n = raw_end
-            .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse::<i64>().ok())))
-            .ok_or_else(|| AppError::BadRequest("End value is required for between operator".into()))?;
+            .and_then(|v| {
+                v.as_i64()
+                    .or_else(|| v.as_str().and_then(|s| s.parse::<i64>().ok()))
+            })
+            .ok_or_else(|| {
+                AppError::BadRequest("End value is required for between operator".into())
+            })?;
         let end_val = json!(n);
         if let (Some(start), Some(end)) = (value.as_i64(), end_val.as_i64()) {
             if start > end {
@@ -371,7 +388,10 @@ pub fn parse_config(config: &HashMap<String, Value>) -> Result<WebConditions, Ap
         .unwrap_or(false);
     let min_account_age_days = config
         .get("min_account_age_days")
-        .and_then(|v| v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse::<i64>().ok())))
+        .and_then(|v| {
+            v.as_i64()
+                .or_else(|| v.as_str().and_then(|s| s.parse::<i64>().ok()))
+        })
         .unwrap_or(0)
         .clamp(0, 3650) as i32;
     let anonymous_mode = config

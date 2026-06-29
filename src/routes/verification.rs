@@ -9,8 +9,8 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 
 use crate::error::AppError;
-use crate::services::session;
 use crate::services::fraud;
+use crate::services::session;
 use crate::services::sync::PlayerSyncEvent;
 use crate::services::ua_parser::parse_user_agent;
 use crate::AppState;
@@ -608,9 +608,7 @@ run();
 }
 
 /// Redirect to Auth Gateway for Discord login.
-pub async fn login(
-    State(state): State<Arc<AppState>>,
-) -> Result<Redirect, AppError> {
+pub async fn login(State(state): State<Arc<AppState>>) -> Result<Redirect, AppError> {
     let return_to = "/member-origin-role/verify";
     let url = format!("/auth/login?return_to={}", urlencoding::encode(return_to));
     Ok(Redirect::temporary(&url))
@@ -669,13 +667,9 @@ pub async fn collect(
     if let Some(secret) = state.config.turnstile_secret_key.as_deref() {
         let token = payload.turnstile_token.as_deref().unwrap_or("");
         let remote_ip = extract_ip(&headers);
-        let ok = crate::services::turnstile::verify(
-            &state.http,
-            secret,
-            token,
-            remote_ip.as_deref(),
-        )
-        .await;
+        let ok =
+            crate::services::turnstile::verify(&state.http, secret, token, remote_ip.as_deref())
+                .await;
         if !ok {
             // 403 (not 400) so the anonymous page — which deliberately swallows
             // the 400 cooldown — still surfaces a real bot-check failure.

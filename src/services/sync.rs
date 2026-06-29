@@ -23,10 +23,7 @@ pub struct ConfigSyncEvent {
 }
 
 /// Sync roles for a single user across all guilds.
-pub async fn sync_for_player(
-    discord_id: &str,
-    state: &AppState,
-) -> Result<(), AppError> {
+pub async fn sync_for_player(discord_id: &str, state: &AppState) -> Result<(), AppError> {
     let pool = &state.pool;
     let rl_client = &state.rl_client;
 
@@ -81,14 +78,15 @@ pub async fn sync_for_player(
         "sync_for_player: Auth Gateway returned guilds"
     );
 
-    let role_links = sqlx::query_as::<_, (String, String, String, sqlx::types::Json<WebConditions>)>(
-        "SELECT rl.guild_id, rl.role_id, rl.api_token, rl.conditions \
+    let role_links =
+        sqlx::query_as::<_, (String, String, String, sqlx::types::Json<WebConditions>)>(
+            "SELECT rl.guild_id, rl.role_id, rl.api_token, rl.conditions \
          FROM role_links rl \
          WHERE rl.guild_id = ANY($1)",
-    )
-    .bind(&guild_ids[..])
-    .fetch_all(pool)
-    .await?;
+        )
+        .bind(&guild_ids[..])
+        .fetch_all(pool)
+        .await?;
 
     if role_links.is_empty() {
         tracing::warn!(
@@ -117,8 +115,16 @@ pub async fn sync_for_player(
     .collect();
 
     enum Action {
-        Add { guild_id: String, role_id: String, api_token: String },
-        Remove { guild_id: String, role_id: String, api_token: String },
+        Add {
+            guild_id: String,
+            role_id: String,
+            api_token: String,
+        },
+        Remove {
+            guild_id: String,
+            role_id: String,
+            api_token: String,
+        },
     }
 
     let mut actions: Vec<Action> = Vec::new();
@@ -262,7 +268,11 @@ fn build_condition_where(conditions: &WebConditions) -> (String, Vec<ConditionBi
             if field.is_numeric() {
                 let val = conditions.value.as_i64().unwrap_or(0);
                 if matches!(operator, ConditionOperator::Between) {
-                    let end = conditions.value_end.as_ref().and_then(|v| v.as_i64()).unwrap_or(val);
+                    let end = conditions
+                        .value_end
+                        .as_ref()
+                        .and_then(|v| v.as_i64())
+                        .unwrap_or(val);
                     let idx_start = binds.len() + 1;
                     let idx_end = binds.len() + 2;
                     clauses.push(format!("{col} >= ${idx_start} AND {col} <= ${idx_end}"));
@@ -280,7 +290,9 @@ fn build_condition_where(conditions: &WebConditions) -> (String, Vec<ConditionBi
                 let idx = binds.len() + 1;
                 match operator {
                     ConditionOperator::Eq => clauses.push(format!("LOWER({col}) = LOWER(${idx})")),
-                    ConditionOperator::Neq => clauses.push(format!("LOWER({col}) != LOWER(${idx})")),
+                    ConditionOperator::Neq => {
+                        clauses.push(format!("LOWER({col}) != LOWER(${idx})"))
+                    }
                     _ => {}
                 }
                 binds.push(ConditionBind::Text(val));
@@ -328,7 +340,10 @@ pub async fn sync_for_role_link(
         || conditions.block_impossible_travel
         || conditions.min_account_age_days > 0;
     if !has_identity && !has_fraud {
-        match rl_client.replace_users(guild_id, role_id, &[], &api_token).await {
+        match rl_client
+            .replace_users(guild_id, role_id, &[], &api_token)
+            .await
+        {
             Ok(_) => {}
             Err(AppError::RoleLinkNotFound) => {
                 delete_orphan_role_link(guild_id, role_id, pool).await;
@@ -337,8 +352,10 @@ pub async fn sync_for_role_link(
             Err(e) => return Err(e),
         }
         sqlx::query("DELETE FROM role_assignments WHERE guild_id = $1 AND role_id = $2")
-            .bind(guild_id).bind(role_id)
-            .execute(pool).await?;
+            .bind(guild_id)
+            .bind(role_id)
+            .execute(pool)
+            .await?;
         return Ok(());
     }
 
@@ -351,7 +368,10 @@ pub async fn sync_for_role_link(
     .await?;
 
     if member_ids.is_empty() {
-        match rl_client.replace_users(guild_id, role_id, &[], &api_token).await {
+        match rl_client
+            .replace_users(guild_id, role_id, &[], &api_token)
+            .await
+        {
             Ok(_) => {}
             Err(AppError::RoleLinkNotFound) => {
                 delete_orphan_role_link(guild_id, role_id, pool).await;
@@ -361,26 +381,27 @@ pub async fn sync_for_role_link(
         }
         let mut tx = pool.begin().await?;
         sqlx::query("DELETE FROM role_assignments WHERE guild_id = $1 AND role_id = $2")
-            .bind(guild_id).bind(role_id)
-            .execute(&mut *tx).await?;
+            .bind(guild_id)
+            .bind(role_id)
+            .execute(&mut *tx)
+            .await?;
         tx.commit().await?;
         return Ok(());
     }
 
-    let (_user_count, user_limit) = match rl_client
-        .get_user_info(guild_id, role_id, &api_token)
-        .await
-    {
-        Ok(info) => info,
-        Err(AppError::RoleLinkNotFound) => {
-            delete_orphan_role_link(guild_id, role_id, pool).await;
-            return Ok(());
-        }
-        // Other RoleLogic errors here are non-fatal — fall back to defaults
-        // so the worker can still attempt the main replace_users call below
-        // (which has its own RoleLinkNotFound handling).
-        Err(_) => (0, 100),
-    };
+    let (_user_count, user_limit) =
+        match rl_client.get_user_info(guild_id, role_id, &api_token).await {
+            Ok(info) => info,
+            Err(AppError::RoleLinkNotFound) => {
+                delete_orphan_role_link(guild_id, role_id, pool).await;
+                return Ok(());
+            }
+            // Other RoleLogic errors here are non-fatal — fall back to defaults
+            // so the worker can still attempt the main replace_users call below
+            // (which has its own RoleLinkNotFound handling).
+            Err(AppError::RoleLinkDisabled) => return Ok(()),
+            Err(e) => return Err(e),
+        };
 
     let (where_clause, binds) = build_condition_where(&conditions);
 
@@ -395,7 +416,8 @@ pub async fn sync_for_role_link(
          LIMIT ${limit_bind_idx}",
     );
 
-    let qualifying_ids = exec_condition_query(&query_str, &binds, &member_ids, user_limit, pool).await?;
+    let qualifying_ids =
+        exec_condition_query(&query_str, &binds, &member_ids, user_limit, pool).await?;
 
     if !qualifying_ids.is_empty() && qualifying_ids.len() == user_limit {
         let count_query = format!(
@@ -408,7 +430,10 @@ pub async fn sync_for_role_link(
             .unwrap_or(qualifying_ids.len() as i64);
         if total as usize > user_limit {
             tracing::warn!(
-                guild_id, role_id, total, user_limit,
+                guild_id,
+                role_id,
+                total,
+                user_limit,
                 "Role link user limit reached: {total} qualify but limit is {user_limit}"
             );
         }
@@ -428,16 +453,21 @@ pub async fn sync_for_role_link(
 
     let mut tx = pool.begin().await?;
     sqlx::query("DELETE FROM role_assignments WHERE guild_id = $1 AND role_id = $2")
-        .bind(guild_id).bind(role_id)
-        .execute(&mut *tx).await?;
+        .bind(guild_id)
+        .bind(role_id)
+        .execute(&mut *tx)
+        .await?;
 
     if !qualifying_ids.is_empty() {
         sqlx::query(
             "INSERT INTO role_assignments (guild_id, role_id, discord_id) \
              SELECT $1, $2, UNNEST($3::text[])",
         )
-        .bind(guild_id).bind(role_id).bind(&qualifying_ids)
-        .execute(&mut *tx).await?;
+        .bind(guild_id)
+        .bind(role_id)
+        .bind(&qualifying_ids)
+        .execute(&mut *tx)
+        .await?;
     }
 
     tx.commit().await?;
@@ -480,10 +510,7 @@ async fn exec_condition_count(
     Ok(q.fetch_one(pool).await?)
 }
 
-pub async fn remove_all_assignments(
-    discord_id: &str,
-    state: &AppState,
-) -> Result<(), AppError> {
+pub async fn remove_all_assignments(discord_id: &str, state: &AppState) -> Result<(), AppError> {
     let pool = &state.pool;
     let rl_client = &state.rl_client;
 
@@ -498,19 +525,29 @@ pub async fn remove_all_assignments(
     .await?;
 
     for (guild_id, role_id, api_token) in &assignments {
-        match rl_client.remove_user(guild_id, role_id, discord_id, api_token).await {
+        match rl_client
+            .remove_user(guild_id, role_id, discord_id, api_token)
+            .await
+        {
             Ok(_) => {}
             Err(AppError::RoleLinkNotFound) => {
                 delete_orphan_role_link(guild_id, role_id, pool).await;
             }
             Err(e) => {
-                tracing::error!(guild_id, role_id, discord_id, "Failed to remove user during cleanup: {e}");
+                tracing::error!(
+                    guild_id,
+                    role_id,
+                    discord_id,
+                    "Failed to remove user during cleanup: {e}"
+                );
             }
         }
     }
 
     sqlx::query("DELETE FROM role_assignments WHERE discord_id = $1")
-        .bind(discord_id).execute(pool).await?;
+        .bind(discord_id)
+        .execute(pool)
+        .await?;
 
     Ok(())
 }

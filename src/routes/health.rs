@@ -10,7 +10,10 @@ use crate::AppState;
 
 pub async fn favicon() -> impl IntoResponse {
     (
-        [(header::CONTENT_TYPE, "image/x-icon"), (header::CACHE_CONTROL, "public, max-age=604800")],
+        [
+            (header::CONTENT_TYPE, "image/x-icon"),
+            (header::CACHE_CONTROL, "public, max-age=604800"),
+        ],
         include_bytes!("../../favicon.ico").as_slice(),
     )
 }

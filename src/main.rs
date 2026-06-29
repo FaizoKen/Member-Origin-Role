@@ -63,10 +63,11 @@ async fn main() {
         &app_config.base_url,
         app_config.turnstile_site_key.as_deref(),
     ));
-    let verify_anonymous_html = bytes::Bytes::from(routes::verification::render_verify_anonymous_page(
-        &app_config.base_url,
-        app_config.turnstile_site_key.as_deref(),
-    ));
+    let verify_anonymous_html =
+        bytes::Bytes::from(routes::verification::render_verify_anonymous_page(
+            &app_config.base_url,
+            app_config.turnstile_site_key.as_deref(),
+        ));
     let members_html =
         bytes::Bytes::from(routes::members::render_members_page(&app_config.base_url));
 
@@ -92,24 +93,29 @@ async fn main() {
         Arc::clone(&state),
     ));
     let app = Router::new()
-        .nest("/member-origin-role", Router::new()
-            // Plugin endpoints (called by RoleLogic)
-            .route("/register", post(routes::plugin::register))
-            .route("/config", get(routes::plugin::get_config))
-            .route("/config", post(routes::plugin::post_config))
-            .route("/config", delete(routes::plugin::delete_config))
-            // Verification endpoints (user-facing)
-            .route("/verify", get(routes::verification::verify_page))
-            .route("/verify/login", get(routes::verification::login))
-            .route("/verify/status", get(routes::verification::status))
-            .route("/verify/collect", post(routes::verification::collect))
-            .route("/verify/logout", post(routes::verification::logout))
-            // Member list (admin-facing)
-            .route("/members/{guild_id}", get(routes::members::members_page))
-            .route("/members/{guild_id}/data", get(routes::members::members_data))
-            // Health & static
-            .route("/health", get(routes::health::health))
-            .route("/favicon.ico", get(routes::health::favicon))
+        .nest(
+            "/member-origin-role",
+            Router::new()
+                // Plugin endpoints (called by RoleLogic)
+                .route("/register", post(routes::plugin::register))
+                .route("/config", get(routes::plugin::get_config))
+                .route("/config", post(routes::plugin::post_config))
+                .route("/config", delete(routes::plugin::delete_config))
+                // Verification endpoints (user-facing)
+                .route("/verify", get(routes::verification::verify_page))
+                .route("/verify/login", get(routes::verification::login))
+                .route("/verify/status", get(routes::verification::status))
+                .route("/verify/collect", post(routes::verification::collect))
+                .route("/verify/logout", post(routes::verification::logout))
+                // Member list (admin-facing)
+                .route("/members/{guild_id}", get(routes::members::members_page))
+                .route(
+                    "/members/{guild_id}/data",
+                    get(routes::members::members_data),
+                )
+                // Health & static
+                .route("/health", get(routes::health::health))
+                .route("/favicon.ico", get(routes::health::favicon)),
         )
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive())

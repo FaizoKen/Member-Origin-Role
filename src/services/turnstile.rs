@@ -39,7 +39,10 @@ pub async fn verify(
         }
     };
 
-    let ok = body.get("success").and_then(|v| v.as_bool()).unwrap_or(false);
+    let ok = body
+        .get("success")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
     if !ok {
         let codes = body
             .get("error-codes")

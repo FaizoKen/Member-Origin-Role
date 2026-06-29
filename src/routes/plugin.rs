@@ -70,9 +70,13 @@ pub async fn get_config(
 ) -> Result<Json<Value>, AppError> {
     let token = extract_token(&headers)?;
 
-    let link = sqlx::query_as::<_, (String, sqlx::types::Json<crate::models::condition::WebConditions>)>(
-        "SELECT guild_id, conditions FROM role_links WHERE api_token = $1",
-    )
+    let link = sqlx::query_as::<
+        _,
+        (
+            String,
+            sqlx::types::Json<crate::models::condition::WebConditions>,
+        ),
+    >("SELECT guild_id, conditions FROM role_links WHERE api_token = $1")
     .bind(&token)
     .fetch_optional(&state.pool)
     .await?
@@ -80,13 +84,12 @@ pub async fn get_config(
 
     // view_permission is per-guild, not per-role-link. Default 'managers'
     // when a guild_settings row doesn't yet exist.
-    let view_permission: String = sqlx::query_scalar(
-        "SELECT view_permission FROM guild_settings WHERE guild_id = $1",
-    )
-    .bind(&link.0)
-    .fetch_optional(&state.pool)
-    .await?
-    .unwrap_or_else(|| "managers".to_string());
+    let view_permission: String =
+        sqlx::query_scalar("SELECT view_permission FROM guild_settings WHERE guild_id = $1")
+            .bind(&link.0)
+            .fetch_optional(&state.pool)
+            .await?
+            .unwrap_or_else(|| "managers".to_string());
 
     // Per-guild verify URL. The `?guild=<id>` query param is what the
     // verify page reads to (a) show "Verifying for <Server>" context and

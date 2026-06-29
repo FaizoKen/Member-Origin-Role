@@ -112,7 +112,10 @@ async fn fetch_proxycheck(
 
     let body: Value = resp.json().await.ok()?;
     let ip_entry = body.get(ip)?;
-    let proxy_str = ip_entry.get("proxy").and_then(|v| v.as_str()).unwrap_or("no");
+    let proxy_str = ip_entry
+        .get("proxy")
+        .and_then(|v| v.as_str())
+        .unwrap_or("no");
     let asn_org = ip_entry
         .get("provider")
         .and_then(|v| v.as_str())
