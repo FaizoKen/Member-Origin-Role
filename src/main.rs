@@ -114,6 +114,7 @@ async fn main() {
                     get(routes::members::members_data),
                 )
                 // Health & static
+                .route("/dweeb/status", get(routes::dweeb::status))
                 .route("/health", get(routes::health::health))
                 .route("/favicon.ico", get(routes::health::favicon)),
         )
