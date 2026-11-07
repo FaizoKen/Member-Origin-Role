@@ -14,6 +14,10 @@ concurrency:
 
 env:
   CARGO_TERM_COLOR: always
+  # .cargo/config.toml points CC/AR at a Windows dev machine's toolchain; cargo's
+  # [env] never overrides a variable already set, so the runner's own win.
+  CC: cc
+  AR: ar
 
 jobs:
   test:
