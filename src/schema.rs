@@ -231,7 +231,7 @@ pub fn build_config_schema(
                         "key": "anonymous_mode",
                         "label": "Anonymous mode",
                         "default_value": true,
-                        "description": "When ON (default), the verify page shows only a generic 'You're all set' message — no country, timezone, browser, or other detected data is shown back to the user. The page also auto-redirects to Discord login immediately (no 'Sign in' button to click), so the flow is one click: member opens the link, signs in, done. Detection and role assignment work exactly the same; only the UI changes. Turn OFF to show members what was detected. It applies to this server's link: if any of its role links turns it off, members see what was detected."
+                        "description": "When ON (default), the verify page shows only a generic 'You're all set' message — no country, timezone, browser or other detected data is shown back. It also skips the 'Sign in' button and goes straight to Discord login, so the flow is one click. Detection and roles work exactly the same; only the page changes. Turn OFF to show members what was detected. It is per server: if any of this server's role links turns it off, its link shows the details."
                     }
                 ]
             },
@@ -514,6 +514,37 @@ mod tests {
 
     fn cfg(pairs: &[(&str, Value)]) -> HashMap<String, Value> {
         pairs.iter().map(|(k, v)| (k.to_string(), v.clone())).collect()
+    }
+
+    /// The RoleLogic API validates the schema before the dashboard sees it
+    /// (api/src/api/role-link/plugin-schema.validation.ts): one description over
+    /// its limit and the settings don't open at all ("Plugin returned invalid
+    /// schema"). Lengths are counted as JavaScript counts them, in UTF-16 units.
+    #[test]
+    fn the_schema_fits_the_dashboards_limits() {
+        let schema = build_config_schema(&WebConditions::default(), "v", "m", "managers");
+        let len = |v: &Value| v.as_str().map(|s| s.encode_utf16().count()).unwrap_or(0);
+        assert!(len(&schema["description"]) <= 500);
+        let sections = schema["sections"].as_array().unwrap();
+        assert!(sections.len() <= 10);
+        for section in sections {
+            assert!(len(&section["description"]) <= 500, "{}", section["title"]);
+            let fields = section["fields"].as_array().unwrap();
+            assert!(!fields.is_empty() && fields.len() <= 30);
+            for f in fields {
+                assert!(len(&f["description"]) <= 500, "{}", f["key"]);
+                assert!(len(&f["label"]) <= 200, "{}", f["key"]);
+                if f["type"] == "display" {
+                    assert!(len(&f["value"]) <= 2000, "{}", f["key"]);
+                }
+                for o in f["options"].as_array().into_iter().flatten() {
+                    assert!(len(&o["label"]) <= 100, "{}", o["label"]);
+                }
+                if let Some(m) = f["validation"]["pattern_message"].as_str() {
+                    assert!(m.encode_utf16().count() <= 200);
+                }
+            }
+        }
     }
 
     #[test]
