@@ -92,6 +92,7 @@ async fn main() {
         config_sync_rx,
         Arc::clone(&state),
     ));
+    tokio::spawn(tasks::age_gate_worker::run(Arc::clone(&state)));
     let app = Router::new()
         .nest(
             "/member-origin-role",

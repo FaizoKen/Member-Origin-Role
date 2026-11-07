@@ -102,22 +102,27 @@ fn country_offset_plausible(country: &str, offset_minutes: i32) -> bool {
         "CA" => &[
             -210, -150, -240, -180, -300, -240, -360, -300, -420, -360, -480, -420,
         ], // NST..PST + DST
-        "MX" => &[-300, -360, -300, -420, -360],
+        // Baja California keeps US Pacific time (-480 in winter).
+        "MX" => &[-300, -360, -420, -480],
         "BR" => &[-120, -180, -240, -300],
         "AR" => &[-180],
-        "CL" => &[-180, -240],
-        "CO" | "PE" | "EC" => &[-300],
+        "CL" => &[-180, -240, -300, -360], // Easter Island: -360 / -300
+        "CO" | "PE" => &[-300],
+        "EC" => &[-300, -360], // Galápagos: -360
         // Europe
-        "GB" | "IE" | "PT" => &[0, 60], // GMT/BST
-        "DE" | "FR" | "IT" | "ES" | "NL" | "BE" | "AT" | "CH" | "SE" | "NO" | "DK" | "PL"
-        | "CZ" | "HU" | "HR" | "SK" | "SI" => &[60, 120], // CET/CEST
+        "GB" | "IE" => &[0, 60],     // GMT/BST
+        "PT" => &[-60, 0, 60],       // + the Azores (-60 / 0)
+        "ES" => &[0, 60, 120],       // + the Canary Islands (0 / 60)
+        "DE" | "FR" | "IT" | "NL" | "BE" | "AT" | "CH" | "SE" | "NO" | "DK" | "PL" | "CZ"
+        | "HU" | "HR" | "SK" | "SI" => &[60, 120], // CET/CEST
         "FI" | "EE" | "LV" | "LT" | "RO" | "BG" | "GR" | "UA" => &[120, 180], // EET/EEST
         "RU" => &[120, 180, 240, 300, 360, 420, 480, 540, 600, 660, 720], // Russia spans many zones
         "TR" => &[180],
         // Asia
         "JP" => &[540],
         "KR" => &[540],
-        "CN" | "HK" | "MO" | "TW" | "SG" | "MY" | "PH" => &[480],
+        "CN" => &[480, 360], // + Asia/Urumqi
+        "HK" | "MO" | "TW" | "SG" | "MY" | "PH" => &[480],
         "IN" => &[330],
         "TH" | "VN" | "KH" | "LA" => &[420],
         "ID" => &[420, 480, 540],
@@ -129,7 +134,7 @@ fn country_offset_plausible(country: &str, offset_minutes: i32) -> bool {
         "IR" => &[210, 270],
         // Oceania
         "AU" => &[480, 525, 570, 600, 630, 660], // AWST..AEDT
-        "NZ" => &[720, 780],                     // NZST/NZDT
+        "NZ" => &[720, 780, 765, 825],           // NZST/NZDT + the Chatham Islands
         // Africa
         "ZA" => &[120],
         "EG" => &[120, 180],
@@ -170,9 +175,43 @@ fn platform_device_consistent(platform: &str, device_type: &str) -> bool {
 /// Falls back to continent-level check for unmapped timezones.
 fn timezone_country_consistent(timezone: &str, country: &str) -> bool {
     let expected: Option<&[&str]> = match timezone {
+        // Windows' shared zones: the default city stands for every country in
+        // the zone (CLDR windowsZones.xml, territory 001), because a PC whose
+        // region was never set reports it for all of them.
+        "America/New_York" => Some(&["US", "CA", "BS"]),
+        "America/Chicago" | "America/Denver" | "America/Los_Angeles" | "America/Phoenix" => {
+            Some(&["US", "CA", "MX"])
+        }
+        "America/Halifax" => Some(&["CA", "BM", "GL"]),
+        "America/Bogota" => Some(&["CO", "PE", "EC", "PA", "JM", "KY", "BR"]),
+        "Europe/London" => Some(&["GB", "IE", "PT", "ES", "IM", "JE", "GG", "FO"]),
+        "Europe/Berlin" => Some(&[
+            "DE", "AT", "CH", "IT", "NL", "SE", "NO", "LI", "LU", "MC", "MT", "AD", "GI", "SM",
+            "VA", "SJ",
+        ]),
+        "Europe/Paris" => Some(&["FR", "BE", "DK", "ES", "MC"]),
+        "Europe/Budapest" => Some(&["HU", "CZ", "SK", "SI", "RS", "ME", "AL"]),
+        "Europe/Warsaw" => Some(&["PL", "BA", "HR", "MK"]),
+        "Europe/Bucharest" => Some(&["RO", "GR", "CY"]),
+        "Europe/Kiev" | "Europe/Kyiv" => Some(&["UA", "FI", "BG", "EE", "LV", "LT", "AX"]),
+        "Europe/Moscow" => Some(&["RU", "UA"]),
+        "Asia/Singapore" => Some(&["SG", "MY", "BN", "PH", "ID"]),
+        "Asia/Bangkok" => Some(&["TH", "VN", "KH", "LA", "ID"]),
+        "Asia/Shanghai" => Some(&["CN", "HK", "MO"]),
+        "Asia/Riyadh" => Some(&["SA", "KW", "BH", "QA", "YE"]),
+        "Asia/Qatar" => Some(&["QA", "BH"]),
+        "Asia/Dubai" => Some(&["AE", "OM"]),
+        "Asia/Dhaka" => Some(&["BD", "BT"]),
+        "Africa/Johannesburg" => Some(&[
+            "ZA", "BW", "ZM", "ZW", "MZ", "MW", "LS", "SZ", "RW", "BI", "CD",
+        ]),
+        "Africa/Lagos" => Some(&[
+            "NG", "AO", "BJ", "CM", "CF", "CG", "CD", "GA", "GQ", "NE", "TD", "TN", "DZ",
+        ]),
+        "Africa/Nairobi" => Some(&["KE", "TZ", "UG", "ET", "SO", "DJ", "ER", "KM", "MG", "YT"]),
+        "Africa/Casablanca" => Some(&["MA", "EH"]),
         // United States
-        "America/New_York"
-        | "America/Detroit"
+        "America/Detroit"
         | "America/Indiana/Indianapolis"
         | "America/Indiana/Knox"
         | "America/Indiana/Marengo"
@@ -183,15 +222,11 @@ fn timezone_country_consistent(timezone: &str, country: &str) -> bool {
         | "America/Indiana/Winamac"
         | "America/Kentucky/Louisville"
         | "America/Kentucky/Monticello"
-        | "America/Chicago"
         | "America/Menominee"
         | "America/North_Dakota/Beulah"
         | "America/North_Dakota/Center"
         | "America/North_Dakota/New_Salem"
-        | "America/Denver"
         | "America/Boise"
-        | "America/Phoenix"
-        | "America/Los_Angeles"
         | "America/Anchorage"
         | "America/Juneau"
         | "America/Sitka"
@@ -218,7 +253,6 @@ fn timezone_country_consistent(timezone: &str, country: &str) -> bool {
         | "America/Whitehorse"
         | "America/Dawson"
         | "America/St_Johns"
-        | "America/Halifax"
         | "America/Glace_Bay"
         | "America/Moncton"
         | "America/Goose_Bay"
@@ -228,11 +262,7 @@ fn timezone_country_consistent(timezone: &str, country: &str) -> bool {
         | "America/Rainy_River"
         | "America/Atikokan"
         | "America/Yellowknife" => Some(&["CA"]),
-        // UK / Ireland
-        "Europe/London" => Some(&["GB", "IE"]),
         // Central Europe
-        "Europe/Berlin" => Some(&["DE"]),
-        "Europe/Paris" => Some(&["FR"]),
         "Europe/Rome" => Some(&["IT"]),
         "Europe/Madrid" => Some(&["ES"]),
         "Europe/Amsterdam" => Some(&["NL"]),
@@ -243,16 +273,12 @@ fn timezone_country_consistent(timezone: &str, country: &str) -> bool {
         "Europe/Oslo" => Some(&["NO"]),
         "Europe/Copenhagen" => Some(&["DK"]),
         "Europe/Helsinki" => Some(&["FI"]),
-        "Europe/Warsaw" => Some(&["PL"]),
         "Europe/Prague" => Some(&["CZ", "SK"]),
-        "Europe/Budapest" => Some(&["HU"]),
-        "Europe/Bucharest" => Some(&["RO"]),
         "Europe/Sofia" => Some(&["BG"]),
         "Europe/Athens" => Some(&["GR"]),
         "Europe/Dublin" => Some(&["IE"]),
         "Europe/Lisbon" => Some(&["PT"]),
-        "Europe/Kyiv" => Some(&["UA"]),
-        "Europe/Moscow" | "Europe/Kaliningrad" | "Europe/Samara" | "Europe/Volgograd"
+        "Europe/Kaliningrad" | "Europe/Samara" | "Europe/Volgograd"
         | "Asia/Yekaterinburg" | "Asia/Omsk" | "Asia/Novosibirsk" | "Asia/Krasnoyarsk"
         | "Asia/Irkutsk" | "Asia/Yakutsk" | "Asia/Vladivostok" | "Asia/Magadan"
         | "Asia/Kamchatka" => Some(&["RU"]),
@@ -260,24 +286,18 @@ fn timezone_country_consistent(timezone: &str, country: &str) -> bool {
         // East Asia
         "Asia/Tokyo" => Some(&["JP"]),
         "Asia/Seoul" => Some(&["KR"]),
-        "Asia/Shanghai" | "Asia/Urumqi" => Some(&["CN"]),
+        "Asia/Urumqi" => Some(&["CN"]),
         "Asia/Hong_Kong" => Some(&["HK", "CN"]),
         "Asia/Taipei" => Some(&["TW"]),
-        "Asia/Singapore" => Some(&["SG"]),
         "Asia/Kuala_Lumpur" | "Asia/Kuching" => Some(&["MY"]),
         "Asia/Manila" => Some(&["PH"]),
         "Asia/Jakarta" | "Asia/Pontianak" | "Asia/Makassar" | "Asia/Jayapura" => Some(&["ID"]),
-        "Asia/Bangkok" => Some(&["TH"]),
         "Asia/Ho_Chi_Minh" => Some(&["VN"]),
         // South Asia
         "Asia/Kolkata" | "Asia/Calcutta" => Some(&["IN"]),
-        "Asia/Dhaka" => Some(&["BD"]),
         "Asia/Karachi" => Some(&["PK"]),
         "Asia/Colombo" => Some(&["LK"]),
         // Middle East
-        "Asia/Dubai" => Some(&["AE"]),
-        "Asia/Riyadh" => Some(&["SA"]),
-        "Asia/Qatar" => Some(&["QA"]),
         "Asia/Jerusalem" | "Asia/Tel_Aviv" => Some(&["IL", "PS"]),
         "Asia/Tehran" => Some(&["IR"]),
         "Asia/Baghdad" => Some(&["IQ"]),
@@ -316,14 +336,9 @@ fn timezone_country_consistent(timezone: &str, country: &str) -> bool {
         | "America/Argentina/Cordoba"
         | "America/Argentina/Mendoza" => Some(&["AR"]),
         "America/Santiago" => Some(&["CL"]),
-        "America/Bogota" => Some(&["CO"]),
         "America/Lima" => Some(&["PE"]),
         // Africa
         "Africa/Cairo" => Some(&["EG"]),
-        "Africa/Johannesburg" => Some(&["ZA"]),
-        "Africa/Lagos" => Some(&["NG"]),
-        "Africa/Nairobi" => Some(&["KE"]),
-        "Africa/Casablanca" => Some(&["MA"]),
         _ => None,
     };
 
@@ -749,5 +764,32 @@ mod tests {
     fn test_snowflake_invalid_returns_none() {
         assert!(snowflake_to_created_at("not-a-number").is_none());
         assert!(snowflake_to_created_at("").is_none());
+    }
+
+    // ── Windows' shared zones and real offsets (no false flags) ──
+
+    #[test]
+    fn test_windows_default_zones_are_not_vpns() {
+        let h = HeaderMap::new();
+        // A PC whose region was never set reports the zone's default city.
+        assert!(!detect_vpn(&h, "Asia/Singapore", Some("MY")));
+        assert!(!detect_vpn(&h, "America/New_York", Some("CA")));
+        assert!(!detect_vpn(&h, "Europe/Berlin", Some("AT")));
+        assert!(!detect_vpn(&h, "Asia/Shanghai", Some("HK")));
+        assert!(!detect_vpn(&h, "Europe/Paris", Some("BE")));
+        // Across regions it is still the VPN fingerprint.
+        assert!(detect_vpn(&h, "Asia/Singapore", Some("US")));
+        assert!(detect_vpn(&h, "America/New_York", Some("JP")));
+        assert!(detect_vpn(&h, "Europe/Berlin", Some("FR")));
+    }
+
+    #[test]
+    fn test_offsets_real_regions_use() {
+        assert!(country_offset_plausible("MX", -480)); // Tijuana, winter
+        assert!(country_offset_plausible("ES", 0)); // Canary Islands, winter
+        assert!(country_offset_plausible("PT", -60)); // Azores, winter
+        assert!(country_offset_plausible("NZ", 765)); // Chatham Islands
+        assert!(!country_offset_plausible("JP", -300));
+        assert!(!country_offset_plausible("ES", -300));
     }
 }

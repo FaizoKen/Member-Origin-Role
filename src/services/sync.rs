@@ -4,7 +4,7 @@ use futures_util::stream::{self, StreamExt};
 use sqlx::PgPool;
 
 use crate::error::AppError;
-use crate::models::condition::{ConditionField, ConditionOperator, WebConditions};
+use crate::models::condition::{timezone_names, ConditionField, ConditionOperator, WebConditions};
 use crate::services::auth_gateway;
 use crate::services::condition_eval::{evaluate, WebContextRow};
 use crate::AppState;
@@ -260,11 +260,12 @@ fn build_condition_where(conditions: &WebConditions) -> (String, Vec<ConditionBi
         ));
     }
 
-    // Identity condition
+    // Identity condition (`any` has none: everyone who verified)
     if let Some(field) = ConditionField::from_key(&conditions.field) {
-        if let Some(operator) = ConditionOperator::from_key(&conditions.operator) {
-            let col = field.sql_column();
-
+        if let (Some(operator), Some(col)) = (
+            ConditionOperator::from_key(&conditions.operator),
+            field.sql_column(),
+        ) {
             if field.is_numeric() {
                 let val = conditions.value.as_i64().unwrap_or(0);
                 if matches!(operator, ConditionOperator::Between) {
@@ -284,18 +285,33 @@ fn build_condition_where(conditions: &WebConditions) -> (String, Vec<ConditionBi
                     clauses.push(format!("{col} {op} ${idx}"));
                     binds.push(ConditionBind::Int(val));
                 }
-            } else {
-                // Text/select fields
-                let val = conditions.value.as_str().unwrap_or("").to_string();
+            } else if matches!(operator, ConditionOperator::Eq | ConditionOperator::Neq) {
+                // Text/select fields — the same matching as condition_eval's
+                // compare_text: languages by primary tag ("en" takes en-US),
+                // timezones under any of their names, the rest exactly; all
+                // without case. A missing value fails either way (NULL).
+                let val = conditions.value.as_str().unwrap_or("").trim().to_string();
                 let idx = binds.len() + 1;
-                match operator {
-                    ConditionOperator::Eq => clauses.push(format!("LOWER({col}) = LOWER(${idx})")),
-                    ConditionOperator::Neq => {
-                        clauses.push(format!("LOWER({col}) != LOWER(${idx})"))
+                let same = match field {
+                    ConditionField::Language => {
+                        binds.push(ConditionBind::Text(val.to_ascii_lowercase()));
+                        format!(
+                            "(LOWER({col}) = ${idx} OR LEFT(LOWER({col}), length(${idx}) + 1) = ${idx} || '-')"
+                        )
                     }
-                    _ => {}
-                }
-                binds.push(ConditionBind::Text(val));
+                    ConditionField::Timezone => {
+                        binds.push(ConditionBind::TextArray(timezone_names(&val)));
+                        format!("LOWER({col}) = ANY(${idx}::text[])")
+                    }
+                    _ => {
+                        binds.push(ConditionBind::Text(val));
+                        format!("LOWER({col}) = LOWER(${idx})")
+                    }
+                };
+                clauses.push(match operator {
+                    ConditionOperator::Neq => format!("NOT ({same})"),
+                    _ => same,
+                });
             }
         }
     }
@@ -310,6 +326,7 @@ fn build_condition_where(conditions: &WebConditions) -> (String, Vec<ConditionBi
 enum ConditionBind {
     Int(i64),
     Text(String),
+    TextArray(Vec<String>),
 }
 
 /// Re-evaluate all users for a specific role link (after config change).
@@ -405,7 +422,15 @@ pub async fn sync_for_role_link(
             Err(e) => return Err(e),
         };
 
-    let (where_clause, binds) = build_condition_where(&conditions);
+    let (rule_clause, binds) = build_condition_where(&conditions);
+    // A flipped rule takes the verified members the rule turns away. COALESCE
+    // makes a missing value (NULL) fail the rule, as it does in memory, so
+    // flipping it hands such a member the role there too.
+    let where_clause = if conditions.invert {
+        format!("NOT COALESCE(({rule_clause}), FALSE)")
+    } else {
+        rule_clause
+    };
 
     let members_bind_idx = binds.len() + 1;
     let limit_bind_idx = binds.len() + 2;
@@ -489,6 +514,7 @@ async fn exec_condition_query(
         q = match bind {
             ConditionBind::Int(v) => q.bind(*v),
             ConditionBind::Text(v) => q.bind(v),
+            ConditionBind::TextArray(v) => q.bind(v),
         };
     }
     q = q.bind(member_ids);
@@ -507,6 +533,7 @@ async fn exec_condition_count(
         q = match bind {
             ConditionBind::Int(v) => q.bind(*v),
             ConditionBind::Text(v) => q.bind(v),
+            ConditionBind::TextArray(v) => q.bind(v),
         };
     }
     q = q.bind(member_ids);

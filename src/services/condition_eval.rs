@@ -1,6 +1,8 @@
 use chrono::{DateTime, Utc};
 
-use crate::models::condition::{ConditionField, ConditionOperator, WebConditions};
+use crate::models::condition::{
+    language_matches, timezone_matches, ConditionField, ConditionOperator, WebConditions,
+};
 
 /// Row data from web_contexts table for in-memory evaluation.
 #[derive(Debug, sqlx::FromRow)]
@@ -21,8 +23,9 @@ pub struct WebContextRow {
 
 /// Evaluate conditions against web context. All enabled checks are AND'd.
 /// Fraud checks use current-visit flags so roles update immediately when the issue clears.
+/// `invert` hands the role to the members the rule turns away instead.
 pub fn evaluate(conditions: &WebConditions, ctx: &WebContextRow) -> bool {
-    // Unconfigured (no identity, no fraud checks) → grant to nobody.
+    // Unconfigured (no identity, no fraud checks) → grant to nobody, flipped or not.
     let has_identity = ConditionField::from_key(&conditions.field).is_some();
     let has_fraud = conditions.block_vpn
         || conditions.block_spoofing
@@ -31,7 +34,11 @@ pub fn evaluate(conditions: &WebConditions, ctx: &WebContextRow) -> bool {
     if !has_identity && !has_fraud {
         return false;
     }
+    passes(conditions, ctx) != conditions.invert
+}
 
+/// Does the member pass the rule (every enabled check, then the condition)?
+fn passes(conditions: &WebConditions, ctx: &WebContextRow) -> bool {
     // Fraud checks first (early exit) — use current flags.
     // block_vpn covers both the timezone-mismatch heuristic AND the ASN lookup
     // so admins keep a single toggle for "no proxies."
@@ -63,6 +70,8 @@ pub fn evaluate(conditions: &WebConditions, ctx: &WebContextRow) -> bool {
     };
 
     let actual = match field {
+        // Anyone who verified, once the checks above pass.
+        ConditionField::Any => return true,
         ConditionField::Timezone => ctx.timezone.as_deref(),
         ConditionField::Country => ctx.country.as_deref(),
         ConditionField::Language => ctx.language.as_deref(),
@@ -79,10 +88,11 @@ pub fn evaluate(conditions: &WebConditions, ctx: &WebContextRow) -> bool {
         }
     };
 
-    compare_text(actual, &operator, &conditions.value)
+    compare_text(&field, actual, &operator, &conditions.value)
 }
 
 fn compare_text(
+    field: &ConditionField,
     actual: Option<&str>,
     operator: &ConditionOperator,
     expected: &serde_json::Value,
@@ -91,9 +101,14 @@ fn compare_text(
         return false;
     };
     let expected = expected.as_str().unwrap_or("");
+    let same = match field {
+        ConditionField::Language => language_matches(actual, expected),
+        ConditionField::Timezone => timezone_matches(actual, expected),
+        _ => actual.eq_ignore_ascii_case(expected),
+    };
     match operator {
-        ConditionOperator::Eq => actual.eq_ignore_ascii_case(expected),
-        ConditionOperator::Neq => !actual.eq_ignore_ascii_case(expected),
+        ConditionOperator::Eq => same,
+        ConditionOperator::Neq => !same,
         _ => false,
     }
 }
@@ -337,5 +352,83 @@ mod tests {
         let mut ctx = sample_context();
         ctx.account_created_at = None;
         assert!(evaluate(&c, &ctx));
+    }
+
+    // --- Anyone who verifies, the flipped rule, language & timezone matching ---
+
+    #[test]
+    fn test_anyone_matches_every_verified_member() {
+        let c = cond("any", "", json!(null));
+        assert!(evaluate(&c, &sample_context()));
+        let mut ctx = sample_context();
+        ctx.country = None;
+        ctx.timezone = None;
+        assert!(evaluate(&c, &ctx));
+    }
+
+    #[test]
+    fn test_anyone_still_runs_the_checks() {
+        let mut c = cond("any", "", json!(null));
+        c.block_vpn = true;
+        c.min_account_age_days = 30;
+        assert!(evaluate(&c, &sample_context()));
+        let mut vpn = sample_context();
+        vpn.vpn_asn_detected = true;
+        assert!(!evaluate(&c, &vpn));
+        let mut fresh = sample_context();
+        fresh.account_created_at = Some(Utc::now() - chrono::Duration::days(3));
+        assert!(!evaluate(&c, &fresh));
+    }
+
+    #[test]
+    fn test_flipped_rule_gives_the_role_to_flagged_members() {
+        let mut c = cond("any", "", json!(null));
+        c.block_vpn = true;
+        c.min_account_age_days = 30;
+        c.invert = true;
+        assert!(!evaluate(&c, &sample_context())); // clean → no Needs Review
+        let mut vpn = sample_context();
+        vpn.vpn_detected = true;
+        assert!(evaluate(&c, &vpn));
+        let mut unknown_age = sample_context();
+        unknown_age.account_created_at = None;
+        assert!(evaluate(&c, &unknown_age));
+    }
+
+    #[test]
+    fn test_flipped_condition_and_missing_data() {
+        let mut c = cond("country", "eq", json!("JP"));
+        c.invert = true;
+        assert!(evaluate(&c, &sample_context())); // US member: not JP → gets it
+        let mut no_country = sample_context();
+        no_country.country = None;
+        assert!(evaluate(&c, &no_country)); // fails the rule → flipped
+    }
+
+    #[test]
+    fn test_unconfigured_stays_nobody_when_flipped() {
+        let c = WebConditions {
+            invert: true,
+            ..Default::default()
+        };
+        assert!(!evaluate(&c, &sample_context()));
+    }
+
+    #[test]
+    fn test_language_without_region_matches_regional_tags() {
+        assert!(evaluate(&cond("language", "eq", json!("en")), &sample_context()));
+        assert!(evaluate(&cond("language", "eq", json!("EN-us")), &sample_context()));
+        assert!(!evaluate(&cond("language", "eq", json!("en-GB")), &sample_context()));
+        assert!(!evaluate(&cond("language", "neq", json!("en")), &sample_context()));
+        assert!(evaluate(&cond("language", "neq", json!("ja")), &sample_context()));
+    }
+
+    #[test]
+    fn test_timezone_matches_older_names() {
+        let mut ctx = sample_context();
+        ctx.timezone = Some("Asia/Calcutta".into());
+        assert!(evaluate(&cond("timezone", "eq", json!("Asia/Kolkata")), &ctx));
+        assert!(!evaluate(&cond("timezone", "neq", json!("Asia/Kolkata")), &ctx));
+        assert!(evaluate(&cond("timezone", "eq", json!("america/new_york")), &sample_context()));
     }
 }

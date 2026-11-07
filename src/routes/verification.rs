@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use axum::extract::State;
+use axum::extract::{Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Redirect, Response};
 use axum::Json;
@@ -74,20 +74,49 @@ fn extract_language_from_header(headers: &HeaderMap) -> Option<String> {
     Some(lang.to_string())
 }
 
+#[derive(Deserialize)]
+pub struct VerifyQuery {
+    #[serde(default)]
+    pub guild: Option<String>,
+}
+
 /// Serve the verification SPA page.
 ///
-/// If any role link in this deployment has `anonymous_mode = true`, serve the
-/// silent variant: no data display, auto-bounce to Discord login, generic
-/// "You're all set" message. Otherwise serve the standard transparent page.
-pub async fn verify_page(State(state): State<Arc<AppState>>) -> Response {
-    // Default-silent: render the anonymous page unless some role_link has
+/// Silent (anonymous) mode is a server's choice, so a per-server link
+/// (`?guild=<id>`, the one the dashboard hands out) follows that server's
+/// role links: the silent variant — no data display, auto-bounce to Discord
+/// login, a generic "You're all set" — unless one of them turned it off.
+/// Another server's choice never reaches it. A bare `/verify` (links shared
+/// before `?guild=` existed) can't tell whose it is and keeps the old rule:
+/// silent unless any role link here turned it off.
+pub async fn verify_page(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<VerifyQuery>,
+) -> Response {
+    // Default-silent: render the anonymous page unless a role_link has
     // explicitly opted out (anonymous_mode = false). Missing key = silent.
-    let anonymous = sqlx::query_scalar::<_, bool>(
-        "SELECT NOT EXISTS(SELECT 1 FROM role_links \
-         WHERE (conditions->>'anonymous_mode') = 'false')",
-    )
-    .fetch_one(&state.pool)
-    .await
+    let guild = q
+        .guild
+        .filter(|g| (5..=25).contains(&g.len()) && g.bytes().all(|b| b.is_ascii_digit()));
+    let anonymous = match guild {
+        Some(g) => {
+            sqlx::query_scalar::<_, bool>(
+                "SELECT NOT EXISTS(SELECT 1 FROM role_links \
+                 WHERE guild_id = $1 AND (conditions->>'anonymous_mode') = 'false')",
+            )
+            .bind(g)
+            .fetch_one(&state.pool)
+            .await
+        }
+        None => {
+            sqlx::query_scalar::<_, bool>(
+                "SELECT NOT EXISTS(SELECT 1 FROM role_links \
+                 WHERE (conditions->>'anonymous_mode') = 'false')",
+            )
+            .fetch_one(&state.pool)
+            .await
+        }
+    }
     .unwrap_or(true);
 
     let body = if anonymous {
@@ -319,7 +348,7 @@ async function applyGuildContext() {{
   }}
   const nameHtml = '<span class="gctx-name">' + safeName + '</span>';
   if (wasDisabled) {{
-    showGuildCtx('Enabled Member Origin roles for ' + nameHtml + ' — roles apply on the next sync.');
+    showGuildCtx('Enabled Member Origin roles for ' + nameHtml + '.');
   }} else {{
     showGuildCtx('Member Origin roles are active in ' + nameHtml + '.');
   }}
@@ -403,9 +432,12 @@ async function init() {{
     const status = await api('GET', '/verify/status');
     document.getElementById('username').textContent = status.display_name;
     show('collected');
+    // Session is valid: apply the per-guild side effects (if any) FIRST.
+    // Collecting syncs roles straight away and nothing syncs again until the
+    // next visit, so the gateway must already know a just-joined server and
+    // any opt-out for it must already be cleared.
+    await applyGuildContext();
     await collectData();
-    // Session is valid — apply the per-guild side effects (if any).
-    applyGuildContext();
   }} catch(e) {{
     show('login');
   }}
@@ -564,9 +596,10 @@ async function run() {{
     return;
   }}
 
-  // Signed in — clear any per-guild opt-out silently before/while we
-  // collect identity. No banner in anonymous mode.
-  applyGuildContextSilent();
+  // Signed in — make the gateway know this server and clear any per-guild
+  // opt-out BEFORE collecting: collecting syncs roles straight away, and
+  // nothing syncs again until the next visit. No banner in anonymous mode.
+  await applyGuildContextSilent();
 
   try {{
     const token = await waitForToken();
@@ -637,7 +670,7 @@ pub async fn status(
 }
 
 /// Client sends minimal JS data; server extracts the rest from HTTP headers.
-#[derive(Deserialize, serde::Serialize)]
+#[derive(Deserialize)]
 pub struct CollectPayload {
     pub user_agent: String,
     pub timezone: String,
@@ -645,8 +678,7 @@ pub struct CollectPayload {
     pub language: String,
     pub max_touch_points: Option<i32>,
     /// Cloudflare Turnstile token. Ignored unless Turnstile is configured.
-    /// Skipped from the stored raw_data blob (verification-only, single-use).
-    #[serde(default, skip_serializing)]
+    #[serde(default)]
     pub turnstile_token: Option<String>,
 }
 
@@ -701,13 +733,12 @@ pub async fn collect(
     let touch_points = payload.max_touch_points.unwrap_or(0);
     let (browser, platform, device_type) = parse_user_agent(&payload.user_agent, touch_points);
 
-    // Extract HTTP-level identity
+    // Extract HTTP-level identity. The IP is only looked at here (the
+    // reputation lookup below and Turnstile above) and never stored; nor are
+    // the raw user agent, Accept-Language header or request body — only what
+    // is parsed out of them.
     let country = extract_country(&headers);
     let ip_address = extract_ip(&headers);
-    let accept_language_raw = headers
-        .get("accept-language")
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_string());
     let language = extract_language_from_header(&headers).unwrap_or(payload.language.clone());
 
     // Negate JS offset to standard convention: -300 for EST, +540 for JST
@@ -757,57 +788,49 @@ pub async fn collect(
     let vpn_asn_detected = asn_rep.as_ref().map(|r| r.is_proxy).unwrap_or(false);
     let asn_org = asn_rep.and_then(|r| r.asn_org);
 
-    let raw_data = serde_json::to_value(&payload).unwrap_or_else(|_| json!({}));
-
-    // Upsert web context
-    // "Ever" flags use OR logic: once set, they stay true until cooldown expires.
-    // fraud_clean_since tracks when all current flags became clean.
+    // Upsert web context. raw_data / user_agent / ip_address /
+    // accept_language are legacy columns, kept empty (migration 010 emptied
+    // the rows written before).
     sqlx::query(
         "INSERT INTO web_contexts (discord_id, raw_data, timezone, utc_offset, country, \
          platform, browser, language, device_type, visit_count, \
          vpn_detected, spoofing_detected, impossible_travel, \
-         prev_country, prev_visit_at, \
-         user_agent, ip_address, accept_language, discord_name, \
+         prev_country, prev_visit_at, discord_name, \
          vpn_asn_detected, asn_org, account_created_at, \
          first_visit, last_visit) \
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 1, \
-         $10, $11, $12, \
-         $13, $14, $15, $16, $17, $18, \
-         $19, $20, $21, \
+         VALUES ($1, '{}'::jsonb, $2, $3, $4, $5, $6, $7, $8, 1, \
+         $9, $10, $11, \
+         $12, $13, $14, \
+         $15, $16, $17, \
          now(), now()) \
          ON CONFLICT (discord_id) DO UPDATE SET \
-         raw_data = $2, timezone = $3, utc_offset = $4, country = COALESCE($5, web_contexts.country), \
-         platform = $6, browser = $7, language = $8, device_type = $9, \
-         vpn_detected = $10, spoofing_detected = $11, impossible_travel = $12, \
+         raw_data = '{}'::jsonb, timezone = $2, utc_offset = $3, country = COALESCE($4, web_contexts.country), \
+         platform = $5, browser = $6, language = $7, device_type = $8, \
+         vpn_detected = $9, spoofing_detected = $10, impossible_travel = $11, \
          prev_country = web_contexts.country, prev_visit_at = web_contexts.last_visit, \
-         user_agent = $15, ip_address = COALESCE($16, web_contexts.ip_address), \
-         accept_language = COALESCE($17, web_contexts.accept_language), \
-         discord_name = $18, \
-         vpn_asn_detected = $19, asn_org = COALESCE($20, web_contexts.asn_org), \
-         account_created_at = COALESCE($21, web_contexts.account_created_at), \
+         user_agent = NULL, ip_address = NULL, accept_language = NULL, \
+         discord_name = $14, \
+         vpn_asn_detected = $15, asn_org = COALESCE($16, web_contexts.asn_org), \
+         account_created_at = COALESCE($17, web_contexts.account_created_at), \
          visit_count = web_contexts.visit_count + 1, last_visit = now()",
     )
     .bind(&discord_id)              // $1
-    .bind(&raw_data)                // $2
-    .bind(&payload.timezone)        // $3
-    .bind(utc_offset)               // $4
-    .bind(&country)                 // $5
-    .bind(&platform)                // $6
-    .bind(&browser)                 // $7
-    .bind(&language)                // $8
-    .bind(&device_type)             // $9
-    .bind(vpn_detected)             // $10
-    .bind(spoofing_detected)        // $11
-    .bind(impossible_travel)        // $12
-    .bind(&prev_country)            // $13 (prev_country for INSERT)
-    .bind(&prev_visit_at)           // $14 (prev_visit_at for INSERT)
-    .bind(&payload.user_agent)      // $15
-    .bind(&ip_address)              // $16
-    .bind(&accept_language_raw)     // $17
-    .bind(&display_name)            // $18
-    .bind(vpn_asn_detected)         // $19
-    .bind(&asn_org)                 // $20
-    .bind(&account_created_at)      // $21
+    .bind(&payload.timezone)        // $2
+    .bind(utc_offset)               // $3
+    .bind(&country)                 // $4
+    .bind(&platform)                // $5
+    .bind(&browser)                 // $6
+    .bind(&language)                // $7
+    .bind(&device_type)             // $8
+    .bind(vpn_detected)             // $9
+    .bind(spoofing_detected)        // $10
+    .bind(impossible_travel)        // $11
+    .bind(&prev_country)            // $12 (prev_country for INSERT)
+    .bind(&prev_visit_at)           // $13 (prev_visit_at for INSERT)
+    .bind(&display_name)            // $14
+    .bind(vpn_asn_detected)         // $15
+    .bind(&asn_org)                 // $16
+    .bind(&account_created_at)      // $17
     .execute(&state.pool)
     .await?;
 

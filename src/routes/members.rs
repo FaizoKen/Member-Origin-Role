@@ -146,7 +146,7 @@ pub fn render_members_page(base_url: &str) -> String {
                         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
                         <input type="text" id="search" placeholder="Search members..." />
                     </div>
-                    <p class="search-hint">Search by Discord name, ID, country, timezone, or platform</p>
+                    <p class="search-hint">Search by Discord name, ID, country, timezone, language, platform or browser</p>
                 </div>
                 <span class="badge" id="member-count"></span>
             </div>

@@ -2,7 +2,9 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 
 use crate::error::AppError;
-use crate::models::condition::{ConditionField, ConditionOperator, WebConditions};
+use crate::models::condition::{
+    canonical_timezone, valid_language_tag, ConditionField, ConditionOperator, WebConditions,
+};
 
 pub fn build_config_schema(
     conditions: &WebConditions,
@@ -13,9 +15,23 @@ pub fn build_config_schema(
     // Populate current values for the form
     let mut values: HashMap<String, Value> = HashMap::new();
     values.insert("field".into(), json!(conditions.field));
-    // Populate both operator keys so the correct one shows the saved value
-    values.insert("operator".into(), json!(conditions.operator));
-    values.insert("operator_text".into(), json!(conditions.operator));
+    // Only the operator key the saved field uses gets the saved operator. The
+    // other keeps its schema default: the dashboard lets a value override a
+    // default, so an empty or foreign operator here (a fresh link has "") would
+    // show "Select…" and fail validation the moment the admin picks a field.
+    let field = ConditionField::from_key(&conditions.field);
+    let op = ConditionOperator::from_key(&conditions.operator);
+    match (&field, &op) {
+        (Some(f), Some(_)) if f.is_numeric() => {
+            values.insert("operator".into(), json!(conditions.operator));
+        }
+        (Some(f), Some(ConditionOperator::Eq | ConditionOperator::Neq))
+            if *f != ConditionField::Any =>
+        {
+            values.insert("operator_text".into(), json!(conditions.operator));
+        }
+        _ => {}
+    }
     values.insert("block_vpn".into(), json!(conditions.block_vpn));
     values.insert("block_spoofing".into(), json!(conditions.block_spoofing));
     values.insert(
@@ -27,10 +43,11 @@ pub fn build_config_schema(
         json!(conditions.min_account_age_days),
     );
     values.insert("anonymous_mode".into(), json!(conditions.anonymous_mode));
+    values.insert("invert".into(), json!(conditions.invert));
     values.insert("view_permission".into(), json!(view_permission));
 
     // Populate value for the specific field type
-    if !conditions.field.is_empty() {
+    if field.as_ref().is_some_and(|f| *f != ConditionField::Any) {
         let value_key = format!("value_{}", conditions.field);
         values.insert(value_key, conditions.value.clone());
 
@@ -74,9 +91,10 @@ pub fn build_config_schema(
                         "type": "select",
                         "key": "field",
                         "label": "Identity field",
-                        "description": "Which visitor attribute to check.",
+                        "description": "Which visitor attribute to check. \"Anyone who verifies\" checks none: everyone who opens the link gets the role, as long as they pass the Anti-Fraud checks you turn on below.",
                         "validation": { "required": true },
                         "options": [
+                            {"label": "Anyone who verifies", "value": "any"},
                             {"label": "Country (from IP)", "value": "country"},
                             {"label": "Timezone (IANA)", "value": "timezone"},
                             {"label": "UTC Offset (minutes)", "value": "utcOffset"},
@@ -128,7 +146,8 @@ pub fn build_config_schema(
                         "type": "text",
                         "key": "value_timezone",
                         "label": "Timezone",
-                        "description": "IANA timezone, e.g. America/New_York, Europe/London, Asia/Tokyo",
+                        "description": "IANA timezone name, e.g. America/New_York, Europe/London, Asia/Tokyo. Older names that browsers still report (Asia/Calcutta for Asia/Kolkata, Europe/Kiev for Europe/Kyiv) match too.",
+                        "validation": { "required": true },
                         "condition": { "field": "field", "equals": "timezone" }
                     },
                     // Platform
@@ -177,7 +196,8 @@ pub fn build_config_schema(
                         "type": "text",
                         "key": "value_language",
                         "label": "Language",
-                        "description": "BCP 47 language tag, e.g. en, en-US, ja, fr-FR, zh-CN",
+                        "description": "The browser's first language, as a BCP 47 tag. A tag without a region matches every region: en matches en-US and en-GB, while en-US matches only US English. e.g. en, en-US, ja, fr, zh-CN",
+                        "validation": { "required": true, "pattern": "^[A-Za-z]{2,8}(-[A-Za-z0-9]{1,8})*$", "pattern_message": "Enter a language tag such as en, en-US or ja (a hyphen, not an underscore)" },
                         "condition": { "field": "field", "equals": "language" }
                     },
                     // UTC Offset
@@ -186,14 +206,14 @@ pub fn build_config_schema(
                         "key": "value_utcOffset",
                         "label": "UTC Offset (minutes)",
                         "description": "e.g. -300 for EST (UTC-5), 0 for UTC, 540 for JST (UTC+9)",
-                        "validation": { "min": -720, "max": 840 },
+                        "validation": { "required": true, "min": -720, "max": 840 },
                         "condition": { "field": "field", "equals": "utcOffset" }
                     },
                     {
                         "type": "number",
                         "key": "value_end_utcOffset",
                         "label": "UTC Offset (end)",
-                        "validation": { "min": -720, "max": 840 },
+                        "validation": { "required": true, "min": -720, "max": 840 },
                         "pair_with": "value_utcOffset",
                         "conditions": [
                             { "field": "field", "equals": "utcOffset" },
@@ -211,7 +231,7 @@ pub fn build_config_schema(
                         "key": "anonymous_mode",
                         "label": "Anonymous mode",
                         "default_value": true,
-                        "description": "When ON (default), the verify page shows only a generic 'You're all set' message — no country, timezone, browser, or other detected data is shown back to the user. The page also auto-redirects to Discord login immediately (no 'Sign in' button to click), so the flow is one click: member opens the link, signs in, done. Detection and role assignment work exactly the same; only the UI changes. Turn OFF to show members what was detected."
+                        "description": "When ON (default), the verify page shows only a generic 'You're all set' message — no country, timezone, browser, or other detected data is shown back to the user. The page also auto-redirects to Discord login immediately (no 'Sign in' button to click), so the flow is one click: member opens the link, signs in, done. Detection and role assignment work exactly the same; only the UI changes. Turn OFF to show members what was detected. It applies to this server's link: if any of its role links turns it off, members see what was detected."
                     }
                 ]
             },
@@ -241,9 +261,22 @@ pub fn build_config_schema(
                         "type": "number",
                         "key": "min_account_age_days",
                         "label": "Minimum Discord account age (days)",
-                        "description": "Reject Discord accounts younger than this many days. Account creation time is decoded from the Discord user ID (no API call). Useful against alt farms and freshly-minted accounts. 0 = no minimum.",
+                        "description": "Reject Discord accounts younger than this many days. Account creation time is decoded from the Discord user ID (no API call). Useful against alt farms and freshly-minted accounts. A member who is too new gets the role automatically once their account is old enough. 0 = no minimum.",
                         "default_value": 0,
                         "validation": { "min": 0, "max": 3650 }
+                    }
+                ]
+            },
+            {
+                "title": "Flip the Rule",
+                "description": "Give the role to the members this rule turns away, instead of the ones it lets through.",
+                "fields": [
+                    {
+                        "type": "toggle",
+                        "key": "invert",
+                        "label": "Give the role to members who don't match",
+                        "default_value": false,
+                        "description": "For a Needs Review role: choose \"Anyone who verifies\", turn on the Anti-Fraud checks above, then flip it. Members a check flags (a VPN, spoofed details, impossible travel, an account too new) get the role; everyone else doesn't. Only members who opened the link are checked."
                     }
                 ]
             },
@@ -273,7 +306,7 @@ pub fn build_config_schema(
                         "type": "display",
                         "key": "examples",
                         "label": "Common setups",
-                        "value": "**Region-based roles**\nCountry = US  \u{2192}  US visitors only\nCountry = JP  \u{2192}  Japan visitors\nTimezone = Europe/London  \u{2192}  UK timezone members\nUTC Offset between -300 to -240  \u{2192}  US Eastern / Atlantic\n\n**Platform & device roles**\nPlatform = Android  \u{2192}  Android users\nDevice Type = Mobile  \u{2192}  Mobile visitors\nBrowser = Firefox  \u{2192}  Firefox users\n\n**Language-based roles**\nLanguage = ja  \u{2192}  Japanese speakers\nLanguage = en-US  \u{2192}  US English speakers\n\n**Anti-fraud (toggle ON above to enforce)**\nCountry = US + Block VPN  \u{2192}  Real US IPs only\nCountry = JP + Block Timezone Mismatch  \u{2192}  Japan IP with matching timezone\nBoth toggles ON  \u{2192}  Maximum fraud protection"
+                        "value": "**Region roles**\nCountry = JP \u{2192} members connecting from Japan\nTimezone = Europe/London \u{2192} UK time\nUTC Offset between -600 to -180 \u{2192} the Americas\nUTC Offset between -60 to 240 \u{2192} Europe, Africa & the Middle East\nUTC Offset between 300 to 780 \u{2192} Asia-Pacific\n\n**Language roles**\nLanguage = ja \u{2192} Japanese browsers\nLanguage = es \u{2192} every Spanish (es-ES, es-MX, es-419)\n\n**Platform & device roles**\nDevice Type = Mobile \u{2192} phones\nPlatform = iOS \u{2192} iPhones and iPads\n\n**Verification & safety**\nAnyone who verifies + Block VPN + 30-day minimum \u{2192} a Verified role\nCountry = US + Block VPN \u{2192} real US connections only\nThe Verified setup, flipped \u{2192} a Needs Review role for flagged members"
                     }
                 ]
             }
@@ -292,6 +325,22 @@ pub fn parse_config(config: &HashMap<String, Value>) -> Result<WebConditions, Ap
     let field = ConditionField::from_key(field_key)
         .ok_or_else(|| AppError::BadRequest(format!("Invalid field '{field_key}'")))?;
 
+    // "Anyone who verifies" has no comparison and no value.
+    let (operator, value, value_end) = if field == ConditionField::Any {
+        (String::new(), Value::Null, None)
+    } else {
+        parse_identity(&field, field_key, config)?
+    };
+
+    toggles(config, field_key, operator, value, value_end)
+}
+
+/// The comparison and value(s) of an identity condition.
+fn parse_identity(
+    field: &ConditionField,
+    field_key: &str,
+    config: &HashMap<String, Value>,
+) -> Result<(String, Value, Option<Value>), AppError> {
     // Numeric fields use "operator" key, text/select fields use "operator_text" key
     let op_key = if field.is_numeric() {
         config
@@ -334,17 +383,31 @@ pub fn parse_config(config: &HashMap<String, Value>) -> Result<WebConditions, Ap
         if s.is_empty() {
             return Err(AppError::BadRequest("Value is required".into()));
         }
-        validate_select_value(&field, s)?;
+        validate_select_value(field, s)?;
         json!(s)
     } else {
-        let s = raw_value.and_then(|v| v.as_str()).unwrap_or("");
+        let s = raw_value.and_then(|v| v.as_str()).unwrap_or("").trim();
         if s.is_empty() {
             return Err(AppError::BadRequest("Value is required".into()));
         }
-        if field == ConditionField::Country {
-            json!(s.to_uppercase())
-        } else {
-            json!(s)
+        match field {
+            ConditionField::Country => json!(s.to_uppercase()),
+            // A typo would match nobody: only names the timezone database
+            // knows, spelled its way ("asia/tokyo" → "Asia/Tokyo").
+            ConditionField::Timezone => json!(canonical_timezone(s).ok_or_else(|| {
+                AppError::BadRequest(format!(
+                    "Unknown timezone '{s}'. Use an IANA name such as America/New_York or Asia/Tokyo"
+                ))
+            })?),
+            ConditionField::Language => {
+                if !valid_language_tag(s) {
+                    return Err(AppError::BadRequest(format!(
+                        "'{s}' is not a language tag. Use one such as en, en-US or ja"
+                    )));
+                }
+                json!(s)
+            }
+            _ => json!(s),
         }
     };
 
@@ -373,6 +436,17 @@ pub fn parse_config(config: &HashMap<String, Value>) -> Result<WebConditions, Ap
         None
     };
 
+    Ok((op_key.to_string(), value, value_end))
+}
+
+/// The fraud checks, silent mode and the flip, around a parsed condition.
+fn toggles(
+    config: &HashMap<String, Value>,
+    field_key: &str,
+    operator: String,
+    value: Value,
+    value_end: Option<Value>,
+) -> Result<WebConditions, AppError> {
     // Parse fraud toggles
     let block_vpn = config
         .get("block_vpn")
@@ -398,10 +472,14 @@ pub fn parse_config(config: &HashMap<String, Value>) -> Result<WebConditions, Ap
         .get("anonymous_mode")
         .and_then(|v| v.as_bool())
         .unwrap_or(true);
+    let invert = config
+        .get("invert")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
 
     Ok(WebConditions {
         field: field_key.to_string(),
-        operator: op_key.to_string(),
+        operator,
         value,
         value_end,
         block_vpn,
@@ -409,6 +487,7 @@ pub fn parse_config(config: &HashMap<String, Value>) -> Result<WebConditions, Ap
         block_impossible_travel,
         min_account_age_days,
         anonymous_mode,
+        invert,
     })
 }
 
@@ -427,4 +506,100 @@ fn validate_select_value(field: &ConditionField, value: &str) -> Result<(), AppE
         return Err(AppError::BadRequest(format!("Invalid value '{value}'")));
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cfg(pairs: &[(&str, Value)]) -> HashMap<String, Value> {
+        pairs.iter().map(|(k, v)| (k.to_string(), v.clone())).collect()
+    }
+
+    #[test]
+    fn a_fresh_link_keeps_the_comparison_defaults() {
+        // A new link's conditions are empty: neither operator key may carry
+        // its "" over the schema's default, or the dashboard shows "Select…"
+        // and rejects the first save.
+        let schema = build_config_schema(&WebConditions::default(), "v", "m", "managers");
+        let values = schema["values"].as_object().unwrap();
+        assert!(!values.contains_key("operator"));
+        assert!(!values.contains_key("operator_text"));
+    }
+
+    #[test]
+    fn a_saved_operator_lands_on_its_own_key() {
+        let mut c = WebConditions {
+            field: "country".into(),
+            operator: "neq".into(),
+            value: json!("JP"),
+            ..Default::default()
+        };
+        let v = build_config_schema(&c, "v", "m", "managers")["values"].clone();
+        assert_eq!(v["operator_text"], json!("neq"));
+        assert!(v.get("operator").is_none());
+        assert_eq!(v["value_country"], json!("JP"));
+
+        c.field = "utcOffset".into();
+        c.operator = "between".into();
+        c.value = json!(-600);
+        c.value_end = Some(json!(-180));
+        let v = build_config_schema(&c, "v", "m", "managers")["values"].clone();
+        assert_eq!(v["operator"], json!("between"));
+        assert!(v.get("operator_text").is_none());
+        assert_eq!(v["value_end_utcOffset"], json!(-180));
+    }
+
+    #[test]
+    fn the_first_save_needs_no_comparison_pick() {
+        // What the dashboard submits for a fresh link after picking Country
+        // and typing a code: operator_text holds its schema default "eq".
+        let c = parse_config(&cfg(&[
+            ("field", json!("country")),
+            ("operator_text", json!("eq")),
+            ("value_country", json!("jp")),
+        ]))
+        .unwrap();
+        assert_eq!((c.operator.as_str(), c.value.clone()), ("eq", json!("JP")));
+    }
+
+    #[test]
+    fn anyone_needs_no_value() {
+        let c = parse_config(&cfg(&[
+            ("field", json!("any")),
+            ("block_vpn", json!(true)),
+            ("min_account_age_days", json!(30)),
+            ("invert", json!(true)),
+        ]))
+        .unwrap();
+        assert_eq!(c.field, "any");
+        assert_eq!(c.operator, "");
+        assert!(c.value.is_null() && c.block_vpn && c.invert);
+        assert_eq!(c.min_account_age_days, 30);
+    }
+
+    #[test]
+    fn timezones_are_checked_and_spelled_like_the_database() {
+        let c = parse_config(&cfg(&[
+            ("field", json!("timezone")),
+            ("operator_text", json!("eq")),
+            ("value_timezone", json!(" asia/tokyo ")),
+        ]))
+        .unwrap();
+        assert_eq!(c.value, json!("Asia/Tokyo"));
+        assert!(parse_config(&cfg(&[
+            ("field", json!("timezone")),
+            ("operator_text", json!("eq")),
+            ("value_timezone", json!("Asia/Tokio")),
+        ]))
+        .is_err());
+    }
+
+    #[test]
+    fn language_tags_are_checked() {
+        let ok = cfg(&[("field", json!("language")), ("operator_text", json!("eq")), ("value_language", json!("en"))]);
+        assert_eq!(parse_config(&ok).unwrap().value, json!("en"));
+        let bad = cfg(&[("field", json!("language")), ("operator_text", json!("eq")), ("value_language", json!("en_US"))]);
+        assert!(parse_config(&bad).is_err());
+    }
 }
