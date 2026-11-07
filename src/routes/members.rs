@@ -50,7 +50,7 @@ pub fn render_members_page(base_url: &str) -> String {
     <meta name="theme-color" content="#58a6ff">
     <style>
         * {{ box-sizing: border-box; margin: 0; padding: 0; }}
-        body {{ font-family: system-ui, -apple-system, sans-serif; max-width: 1180px; margin: 0 auto; padding: 32px 20px; background: #0e1525; color: #c8ccd4; min-height: 100vh; }}
+        body {{ font-family: system-ui, -apple-system, sans-serif; max-width: 1280px; margin: 0 auto; padding: 32px 20px; background: #0e1525; color: #c8ccd4; min-height: 100vh; }}
         .header {{ margin-bottom: 24px; }}
         .header-top {{ display: flex; align-items: center; gap: 10px; margin-bottom: 6px; justify-content: space-between; }}
         .header-title {{ display: flex; align-items: center; gap: 10px; }}
