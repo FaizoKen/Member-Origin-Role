@@ -60,8 +60,15 @@ pub async fn run_migrations(pool: &PgPool) {
         .await
         .expect("Failed to run migration 009");
 
-    sqlx::raw_sql(include_str!("../migrations/010_forget_raw_request_data.sql"))
+    sqlx::raw_sql(include_str!(
+        "../migrations/010_forget_raw_request_data.sql"
+    ))
+    .execute(pool)
+    .await
+    .expect("Failed to run migration 010");
+
+    sqlx::raw_sql(include_str!("../migrations/011_held_rechecks.sql"))
         .execute(pool)
         .await
-        .expect("Failed to run migration 010");
+        .expect("Failed to run migration 011");
 }
