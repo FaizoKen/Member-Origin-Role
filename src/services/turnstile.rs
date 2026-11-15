@@ -15,6 +15,13 @@ pub async fn verify(
     remote_ip: Option<&str>,
 ) -> bool {
     if token.is_empty() {
+        // Logged like a siteverify refusal (same code Cloudflare would give),
+        // so one query counts both. The pages never post without a token, so
+        // this line means a client that skipped the check.
+        tracing::info!(
+            error_codes = "missing-input-response",
+            "turnstile verification failed"
+        );
         return false;
     }
 

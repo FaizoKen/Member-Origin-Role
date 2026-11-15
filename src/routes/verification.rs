@@ -133,24 +133,148 @@ pub async fn verify_page(
         .into_response()
 }
 
-/// Build the three Turnstile template fragments: the head `<script>`, the
-/// widget `<div>`, and the JS-enabled flag. All empty/"false" when unset.
-fn turnstile_fragments(site_key: Option<&str>) -> (&'static str, String, &'static str) {
+/// The Turnstile gate both verify pages share. It sits in `<head>`, ahead of
+/// api.js, so every callback exists before the widget can call one.
+///
+/// A token can be posted once and lives 300 s. The widget runs the check,
+/// retries a failed one by itself (`retry=auto`, every 8 s) and swaps an
+/// expired token for a fresh one (`refresh-expired=auto`), all between the
+/// browser and Cloudflare. So a page only ever waits for a token: it never
+/// posts without one, never gives up on a check that is still running, and
+/// never reloads to get another (a reload re-runs the session and gateway
+/// calls). A check can run well past 10 s on a slow phone; posting before it
+/// ended (an 8 s cap) is what answered "Bot check failed" under a widget
+/// still showing "Verifying...".
+const TURNSTILE_JS: &str = r##"
+let tsToken = null;
+let tsWaiters = [];
+let tsSince = Date.now();
+// Why the check is stalled, or '' while it runs normally: 'interactive'
+// (needs a tap), 'error:<code>', 'blocked' (api.js didn't load) or
+// 'unsupported' (this browser can't run it).
+let tsIssue = window.__tsLoadFailed ? 'blocked' : '';
+let tsOnChange = function () {};
+
+function tsSetIssue(v) { tsIssue = v; tsOnChange(); }
+
+window.onTurnstileOK = function (t) {
+  const waiters = tsWaiters;
+  tsWaiters = [];
+  tsToken = t;
+  tsSetIssue('');
+  waiters.forEach(function (wake) { wake(); });
+};
+window.onTurnstileExpired = function () { tsToken = null; };
+window.onTurnstileErr = function (code) {
+  tsToken = null;
+  tsSetIssue('error:' + (code || 'unknown'));
+  return true; // shown on the page; the widget keeps retrying by itself
+};
+window.onTurnstileInteractive = function () { tsSetIssue('interactive'); };
+window.onTurnstileInteractiveDone = function () {
+  if (tsIssue === 'interactive') tsSetIssue('');
+};
+window.onTurnstileUnsupported = function () { tsSetIssue('unsupported'); };
+window.onTurnstileLoadFail = function () { tsSetIssue('blocked'); };
+
+// Resolves with a token once the check has passed, however long that takes,
+// and spends it.
+function tsTake() {
+  if (!TS_ENABLED) return Promise.resolve('');
+  if (tsToken) {
+    const t = tsToken;
+    tsToken = null;
+    return Promise.resolve(t);
+  }
+  if (!tsWaiters.length) tsSince = Date.now();
+  const wait = new Promise(function (wake) { tsWaiters.push(wake); });
+  tsOnChange();
+  return wait.then(tsTake);
+}
+
+// Start a fresh check: the last token was spent or refused.
+function tsRenew() {
+  tsToken = null;
+  if (TS_ENABLED && window.turnstile) {
+    try { window.turnstile.reset(); } catch (e) {}
+  }
+}
+
+// "Try again" on a stalled check. One that couldn't load needs the page
+// again; anything else restarts in place, at no cost to the server.
+function tsRetry() {
+  if (tsIssue === 'blocked') { window.location.reload(); return; }
+  tsSince = Date.now();
+  tsSetIssue('');
+  tsRenew();
+}
+
+// What the page should say while it waits for a token. text is '' while the
+// check is simply running.
+function tsDescribe() {
+  const s = { waiting: TS_ENABLED && tsWaiters.length > 0, text: '', retry: false };
+  if (!s.waiting) return s;
+  const waited = Date.now() - tsSince;
+  if (tsIssue === 'interactive') {
+    s.text = 'Tap the box below to finish the security check.';
+  } else if (tsIssue === 'blocked') {
+    s.text = "The security check couldn't load. If you use an ad blocker, private DNS or a VPN, allow challenges.cloudflare.com, then tap Try again.";
+    s.retry = true;
+  } else if (tsIssue === 'unsupported') {
+    s.text = "This browser can't run the security check. Open the link in Chrome, Safari or Firefox.";
+  } else if (tsIssue) {
+    const code = tsIssue.slice(6);
+    s.text = "The security check hasn't passed yet (code " + code + '). It retries by itself, or tap Try again.' +
+      (/^(110600|200100)$/.test(code) ? " Make sure your device's date and time are set automatically." : '');
+    s.retry = true;
+  } else if (waited > 30000) {
+    s.text = "Still checking. If it doesn't finish, tap Try again or open the link in your browser.";
+    s.retry = true;
+  } else if (waited > 12000) {
+    s.text = 'Still checking. This can take a little longer on some phones.';
+  }
+  return s;
+}
+
+// Calls render(tsDescribe()) whenever that changes, until stop() is called.
+function tsWatch(render) {
+  let last = null;
+  const tick = function () {
+    const s = tsDescribe();
+    const key = s.waiting + '|' + s.text + '|' + s.retry;
+    if (key !== last) { last = key; render(s); }
+  };
+  tsOnChange = tick;
+  const iv = setInterval(tick, 1000);
+  tick();
+  return function () { clearInterval(iv); tsOnChange = function () {}; };
+}
+"##;
+
+/// Build the Turnstile template fragments: the head (the shared gate, plus
+/// api.js when a site key is set) and the widget `<div>` (empty when unset).
+/// With no site key the gate hands out empty tokens straight away.
+fn turnstile_fragments(site_key: Option<&str>) -> (String, String) {
+    let gate =
+        |enabled: bool| format!("<script>\nconst TS_ENABLED = {enabled};{TURNSTILE_JS}</script>");
     match site_key {
         Some(k) => (
-            r#"<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer></script>"#,
             format!(
-                r#"<div class="cf-turnstile" data-sitekey="{k}" data-callback="onTurnstileOK" data-error-callback="onTurnstileErr" data-expired-callback="onTurnstileErr" data-theme="dark"></div>"#
+                r#"{}
+<script src="https://challenges.cloudflare.com/turnstile/v0/api.js" async defer onerror="window.__tsLoadFailed=1;if(window.onTurnstileLoadFail)window.onTurnstileLoadFail()"></script>"#,
+                gate(true)
             ),
-            "true",
+            format!(
+                r#"<div class="cf-turnstile" data-sitekey="{k}" data-callback="onTurnstileOK" data-error-callback="onTurnstileErr" data-expired-callback="onTurnstileExpired" data-before-interactive-callback="onTurnstileInteractive" data-after-interactive-callback="onTurnstileInteractiveDone" data-unsupported-callback="onTurnstileUnsupported" data-theme="dark"></div>"#
+            ),
         ),
-        None => ("", String::new(), "false"),
+        None => (gate(false), String::new()),
     }
 }
 
 /// Render the full HTML page for the verification flow.
 pub fn render_verify_page(base_url: &str, turnstile_site_key: Option<&str>) -> String {
-    let (ts_head, ts_widget, ts_enabled) = turnstile_fragments(turnstile_site_key);
+    let (ts_head, ts_widget) = turnstile_fragments(turnstile_site_key);
     format!(
         r##"<!DOCTYPE html>
 <html lang="en">
@@ -174,6 +298,7 @@ h1{{font-size:1.5rem;color:#e6edf3;margin-bottom:.5rem}}
 .btn-discord{{background:#5865F2;color:#fff}}.btn-discord:hover{{background:#4752c4}}
 .btn-refresh{{background:#238636;color:#fff;margin-top:.75rem}}.btn-refresh:hover{{background:#2ea043}}
 .btn-logout{{background:#21262d;color:#c9d1d9;border:1px solid #30363d;margin-top:.75rem}}.btn-logout:hover{{background:#30363d}}
+.btn:disabled{{opacity:.6;cursor:default}}
 .hidden{{display:none}}
 .meta-grid{{display:grid;grid-template-columns:1fr 1fr;gap:.5rem;margin:1rem 0}}
 .meta-item{{background:#0d1117;border:1px solid #21262d;border-radius:6px;padding:.5rem .75rem}}
@@ -184,6 +309,8 @@ h1{{font-size:1.5rem;color:#e6edf3;margin-bottom:.5rem}}
 .msg{{padding:.75rem;border-radius:6px;margin-bottom:1rem;font-size:.85rem}}
 .msg-error{{background:#3d1f1f;border:1px solid #f85149;color:#f85149}}
 .msg-success{{background:#1f3d1f;border:1px solid #3fb950;color:#3fb950}}
+.msg-info{{background:#0d2238;border:1px solid #1f6feb;color:#9ecbff;line-height:1.5}}
+.link-btn{{background:none;border:none;color:#74b9ff;font:inherit;font-weight:600;cursor:pointer;padding:0;margin-left:.4rem;text-decoration:underline}}
 .spinner{{width:20px;height:20px;border:2px solid #30363d;border-top-color:#58a6ff;border-radius:50%;animation:spin .6s linear infinite;display:inline-block;vertical-align:middle;margin-right:.5rem}}
 @keyframes spin{{to{{transform:rotate(360deg)}}}}
 .guild-ctx{{display:none;align-items:center;gap:10px;background:#052e16;border:1px solid #14532d;color:#86efac;padding:8px 14px;border-radius:8px;margin:0 0 12px;font-size:13px;line-height:1.5}}
@@ -209,6 +336,7 @@ h1{{font-size:1.5rem;color:#e6edf3;margin-bottom:.5rem}}
 <span id="guild-ctx-text"></span>
 </div>
 <div id="msg" class="hidden"></div>
+<div id="check" class="msg msg-info hidden"><span class="spinner"></span><span id="check-text"></span><button id="check-retry" class="link-btn hidden" onclick="tsRetry()">Try again</button></div>
 <div id="loading"><span class="spinner"></span> Loading...</div>
 <div style="display:flex;justify-content:center;margin:.5rem 0">{ts_widget}</div>
 <div id="login" class="hidden">
@@ -227,7 +355,7 @@ Sign in with Discord
 Receiving Member Origin roles in servers you didn't intend?
 <a href="/auth/my_servers?from=/member-origin-role/verify">Choose which servers receive roles &rarr;</a>
 </p>
-<button class="btn btn-refresh" onclick="collectData()">Refresh Data</button>
+<button id="refresh-btn" class="btn btn-refresh" onclick="collectData()">Refresh Data</button>
 <button class="btn btn-logout" onclick="doLogout()">Log Out</button>
 </div>
 </div>
@@ -285,8 +413,12 @@ async function api(method, path, body) {{
   const opts = {{ method, credentials: 'include', headers: {{'Content-Type': 'application/json'}} }};
   if (body) opts.body = JSON.stringify(body);
   const res = await fetch(BASE + path, opts);
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error || 'Request failed');
+  const data = await res.json().catch(() => ({{}}));
+  if (!res.ok) {{
+    const err = new Error(data.error || 'Request failed');
+    err.status = res.status;
+    throw err;
+  }}
   return data;
 }}
 
@@ -373,48 +505,56 @@ function renderMeta(ctx) {{
   }}
 }}
 
-const TS_ENABLED = {ts_enabled};
-let tsToken = null;
-window.onTurnstileOK = function(t) {{ tsToken = t; }};
-window.onTurnstileErr = function() {{ tsToken = null; }};
-
-function waitForToken() {{
-  if (!TS_ENABLED) return Promise.resolve('');
-  if (tsToken) return Promise.resolve(tsToken);
-  return new Promise(function(resolve) {{
-    const start = Date.now();
-    const iv = setInterval(function() {{
-      if (tsToken) {{ clearInterval(iv); resolve(tsToken); }}
-      else if (Date.now() - start > 8000) {{ clearInterval(iv); resolve(''); }}
-    }}, 150);
-  }});
-}}
+// One collect at a time: two in flight would post the same single-use token.
+let collecting = false;
 
 async function collectData() {{
+  if (collecting) return;
+  collecting = true;
+  const btn = document.getElementById('refresh-btn');
+  const check = document.getElementById('check');
+  btn.disabled = true;
+  const stopWatch = tsWatch(function(s) {{
+    check.classList.toggle('hidden', !s.waiting);
+    document.getElementById('check-text').textContent = s.text || 'Running a quick security check...';
+    document.getElementById('check-retry').classList.toggle('hidden', !s.retry);
+  }});
   try {{
-    const token = await waitForToken();
-    const payload = {{
-      user_agent: navigator.userAgent,
-      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-      timezone_offset: new Date().getTimezoneOffset(),
-      language: navigator.language,
-      max_touch_points: navigator.maxTouchPoints || 0,
-      turnstile_token: token,
-    }};
-    const result = await api('POST', '/verify/collect', payload);
-    if (result.context) renderMeta(result.context);
-    if (result.hint) {{
-      showMsg(result.hint, 'error');
-    }} else {{
-      showMsg('Identity data collected successfully!', 'success');
+    for (let attempt = 1; ; attempt++) {{
+      const token = await tsTake();
+      const payload = {{
+        user_agent: navigator.userAgent,
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        timezone_offset: new Date().getTimezoneOffset(),
+        language: navigator.language,
+        max_touch_points: navigator.maxTouchPoints || 0,
+        turnstile_token: token,
+      }};
+      let result;
+      try {{
+        result = await api('POST', '/verify/collect', payload);
+      }} catch(e) {{
+        // A refused token can be ordinary (it expired while the phone slept),
+        // so it gets one fresh check before the refusal is shown.
+        if (e.status === 403 && TS_ENABLED && attempt === 1) {{ tsRenew(); continue; }}
+        throw e;
+      }}
+      if (result.context) renderMeta(result.context);
+      if (result.hint) {{
+        showMsg(result.hint, 'error');
+      }} else {{
+        showMsg('Identity data collected successfully!', 'success');
+      }}
+      return;
     }}
   }} catch(e) {{
     showMsg(e.message, 'error');
   }} finally {{
-    if (TS_ENABLED && window.turnstile) {{
-      try {{ turnstile.reset(); }} catch(e) {{}}
-      tsToken = null;
-    }}
+    stopWatch();
+    check.classList.add('hidden');
+    tsRenew(); // so a fresh token is ready by the next Refresh Data
+    btn.disabled = false;
+    collecting = false;
   }}
 }}
 
@@ -458,7 +598,7 @@ init();
 ///   - On success, shows a generic "You're all set" message only.
 ///   - Cooldown errors on /verify/collect are swallowed (data already exists).
 pub fn render_verify_anonymous_page(base_url: &str, turnstile_site_key: Option<&str>) -> String {
-    let (ts_head, ts_widget, ts_enabled) = turnstile_fragments(turnstile_site_key);
+    let (ts_head, ts_widget) = turnstile_fragments(turnstile_site_key);
     format!(
         r##"<!DOCTYPE html>
 <html lang="en">
@@ -481,6 +621,8 @@ p{{color:#8b949e;font-size:.95rem;line-height:1.5}}
 @keyframes spin{{to{{transform:rotate(360deg)}}}}
 .check{{font-size:3rem;color:#3fb950;margin-bottom:1rem;line-height:1}}
 .x{{font-size:3rem;color:#f85149;margin-bottom:1rem;line-height:1}}
+.btn{{display:inline-block;margin-top:1.1rem;padding:.65rem 1.4rem;border-radius:8px;border:1px solid #30363d;background:#21262d;color:#e6edf3;font:inherit;font-size:.95rem;font-weight:600;cursor:pointer}}
+.btn:hover{{background:#30363d}}
 .hidden{{display:none}}
 </style>
 </head>
@@ -489,7 +631,8 @@ p{{color:#8b949e;font-size:.95rem;line-height:1.5}}
 <div id="loading">
 <div class="spinner"></div>
 <h1>Just a moment...</h1>
-<p>Confirming your access.</p>
+<p id="loading-msg">Confirming your access.</p>
+<button id="loading-retry" class="btn hidden" onclick="tsRetry()">Try again</button>
 </div>
 <div id="done" class="hidden">
 <div class="check">&#10003;</div>
@@ -500,6 +643,7 @@ p{{color:#8b949e;font-size:.95rem;line-height:1.5}}
 <div class="x">!</div>
 <h1>Something went wrong</h1>
 <p id="error-msg">Please try again.</p>
+<button class="btn" onclick="tsRetry(); submit();">Try again</button>
 </div>
 <div style="display:flex;justify-content:center;margin-top:1.75rem">{ts_widget}</div>
 </div>
@@ -555,23 +699,6 @@ async function applyGuildContextSilent() {{
   }} catch (e) {{}}
 }}
 
-const TS_ENABLED = {ts_enabled};
-let tsToken = null;
-window.onTurnstileOK = function(t) {{ tsToken = t; }};
-window.onTurnstileErr = function() {{ tsToken = null; }};
-
-function waitForToken() {{
-  if (!TS_ENABLED) return Promise.resolve('');
-  if (tsToken) return Promise.resolve(tsToken);
-  return new Promise(function(resolve) {{
-    const start = Date.now();
-    const iv = setInterval(function() {{
-      if (tsToken) {{ clearInterval(iv); resolve(tsToken); }}
-      else if (Date.now() - start > 8000) {{ clearInterval(iv); resolve(''); }}
-    }}, 150);
-  }});
-}}
-
 function show(id) {{
   ['loading','done','error'].forEach(s => document.getElementById(s).classList.add('hidden'));
   document.getElementById(id).classList.remove('hidden');
@@ -600,36 +727,64 @@ async function run() {{
   // opt-out BEFORE collecting: collecting syncs roles straight away, and
   // nothing syncs again until the next visit. No banner in anonymous mode.
   await applyGuildContextSilent();
+  await submit();
+}}
 
+function fail(text) {{
+  document.getElementById('error-msg').textContent = text;
+  show('error');
+}}
+
+// One submit at a time: two in flight would post the same single-use token.
+let busy = false;
+
+// Wait for the security check (however long it takes; the spinner says why
+// when it stalls), then post. Retrying never reloads the page, so the session
+// and gateway calls above run once per visit.
+async function submit() {{
+  if (busy) return;
+  busy = true;
+  show('loading');
+  const stopWatch = tsWatch(function(s) {{
+    document.getElementById('loading-msg').textContent = s.text || 'Confirming your access.';
+    document.getElementById('loading-retry').classList.toggle('hidden', !s.retry);
+  }});
   try {{
-    const token = await waitForToken();
-    const payload = {{
-      user_agent: navigator.userAgent,
-      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
-      timezone_offset: new Date().getTimezoneOffset(),
-      language: navigator.language,
-      max_touch_points: navigator.maxTouchPoints || 0,
-      turnstile_token: token,
-    }};
-    const res = await fetch(BASE + '/verify/collect', {{
-      method: 'POST',
-      credentials: 'include',
-      headers: {{ 'Content-Type': 'application/json' }},
-      body: JSON.stringify(payload),
-    }});
-    // 400 from cooldown is fine — data already on file. Anything else
-    // (incl. 403 bot-check failure) surfaces.
-    if (!res.ok && res.status !== 400) {{
-      let msg = 'Please try again.';
-      try {{ const d = await res.json(); if (d && d.error) msg = d.error; }} catch(e) {{}}
-      document.getElementById('error-msg').textContent = msg;
-      show('error');
+    for (let attempt = 1; ; attempt++) {{
+      const token = await tsTake();
+      const payload = {{
+        user_agent: navigator.userAgent,
+        timezone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+        timezone_offset: new Date().getTimezoneOffset(),
+        language: navigator.language,
+        max_touch_points: navigator.maxTouchPoints || 0,
+        turnstile_token: token,
+      }};
+      const res = await fetch(BASE + '/verify/collect', {{
+        method: 'POST',
+        credentials: 'include',
+        headers: {{ 'Content-Type': 'application/json' }},
+        body: JSON.stringify(payload),
+      }});
+      // 403 is the bot check refusing the token. That can be ordinary (it
+      // expired while the phone slept), so it gets one fresh check first.
+      if (res.status === 403 && TS_ENABLED && attempt === 1) {{ tsRenew(); continue; }}
+      // 400 from cooldown is fine — data already on file. Anything else
+      // (incl. a second 403) surfaces.
+      if (!res.ok && res.status !== 400) {{
+        let msg = 'Please try again.';
+        try {{ const d = await res.json(); if (d && d.error) msg = d.error; }} catch(e) {{}}
+        fail(msg);
+        return;
+      }}
+      show('done');
       return;
     }}
-    show('done');
   }} catch(e) {{
-    document.getElementById('error-msg').textContent = e.message || 'Network error.';
-    show('error');
+    fail(e.message || 'Network error.');
+  }} finally {{
+    stopWatch();
+    busy = false;
   }}
 }}
 
@@ -706,7 +861,7 @@ pub async fn collect(
             // 403 (not 400) so the anonymous page — which deliberately swallows
             // the 400 cooldown — still surfaces a real bot-check failure.
             return Err(AppError::Forbidden(
-                "Bot check failed. Please refresh the page and try again.".into(),
+                "The security check didn't go through. Please try again.".into(),
             ));
         }
     }
